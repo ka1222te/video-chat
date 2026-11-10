@@ -1,0 +1,17 @@
+# 環境変数ファイル (.env.sample のみ追跡する)
+.env
+.env.*
+!.env.sample
+
+# ビルド成果物 (./scripts/setup.sh で生成)
+bin/
+public/video-chat.wasm
+public/wasm_exec.js
+
+# 実行時の状態・ログ
+.state/
+
+# エディタのバックアップ・一時ファイル
+*~
+*.swp
+*.swo

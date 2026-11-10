@@ -1,0 +1,285 @@
+<html lang="ja">
+
+<head>
+    <meta charset="utf-8">
+    <title>Video Chat</title>
+    <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/gh/Chalarangelo/mini.css@v3.0.1/dist/mini-default.min.css">
+</head>
+
+<body>
+    <header class="sticky row">
+        <h4>Video Chat</h4>
+    </header>
+    <div>
+        <p>
+            <button onclick="startVideoChat()" class="secondary">START VIDEO CHAT</button>
+        </p>
+        <div class="row">
+            <div class="col-sm-6 col-md-6">
+                <h4>LOCAL CAMERA</h4>
+                <video id="localVideo" autoplay muted playsinline style="width: 100%; background: #000;"></video>
+            </div>
+            <div class="col-sm-6 col-md-6">
+                <h4>REMOTE CAMERA</h4>
+                <canvas id="remoteCanvas" style="width: 100%; background: #000;"></canvas>
+            </div>
+        </div>
+        <h4>CONNECTION LOG</h4>
+        <textarea style="height:300px;width:100%;" id="logs" disabled></textarea>
+    </div>
+</body>
+
+</html>
+
+<script src="wasm_exec.js"></script>
+<script>
+    const go = new Go();
+    // WebAssembly.instantiateStreaming(fetch("video-chat.wasm"), go.importObject).then((result) => {
+    //     go.run(result.instance);
+    // });
+    fetch("video-chat.wasm")
+      .then(r => r.arrayBuffer())
+      .then(bytes => WebAssembly.instantiate(bytes, go.importObject))
+      .then(result => {
+          go.run(result.instance);
+      });
+
+    let p2pReady = false; // DataChannel準備完了フラグ
+    let frameTimer = null; // フレームタイマー(送信用)
+    let sendStartTime = null; // 送信開始タイムスタンプ
+    let sendSequence = 0; // 送信シーケンス
+
+    window.onP2PReady = function () { // DataChannel準備完了処理
+        p2pReady = true; // 準備完了フラグを立てる
+        sendStartTime = performance.now(); // 送信開始時刻を記録
+        sendSequence = 0; // シーケンス番号をリセット
+        appendLog("[Sys]: P2P DataChannel is ready. Start camera."); // ログ追加
+        startLocalCamera(); // カメラ起動&データ送信
+    };
+
+    function startVideoChat() { // ビデオ通信開始
+        if (!window.NewVideoChat) { // ビデオ通信開始処理が存在しないとき
+            alert("WASM is not initialized yet."); // エラー
+            return;
+        }
+        appendLog("[Sys]: Start matchmaking..."); // ログ追加
+        window.NewVideoChat(); // ビデオ通話開始(Go)
+    }
+
+    const MAX_LOG_CHARS = 20000; // ログの最大文字数(相手からの大量のメッセージでメモリを圧迫しないよう古い方から捨てる)
+    function appendLog(msg) { // ログ出力 (textarea の value に追記するため HTML としては解釈されない)
+        const logs = document.getElementById("logs"); // ログ要素取得
+        let text = logs.value + msg + "\n"; // メッセージ追加
+        if (text.length > MAX_LOG_CHARS) {
+            text = text.slice(text.length - MAX_LOG_CHARS);
+        }
+        logs.value = text;
+        logs.scrollTop = logs.scrollHeight; // 高さ更新
+    }
+
+    async function startLocalCamera() { // カメラ+マイク起動&映像フレーム/音声をDataChannel経由で送信
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true,
+            }); // メディア起動
+            const video = document.getElementById("localVideo"); // ローカルビデオ要素取得
+            video.srcObject = stream; // ストリーム指定
+
+            const canvas = document.createElement("canvas"); // キャンバス要素取得
+            const ctx = canvas.getContext("2d"); // コンテキスト取得
+            const MAX_FRAME_WIDTH = 640; // 送信フレームの最大幅(DataChannelのメッセージサイズ上限対策)
+            const probe = document.createElement("canvas"); // WebPエンコード対応確認用
+            probe.width = probe.height = 1;
+            const frameType = probe.toDataURL("image/webp").startsWith("data:image/webp") ? "image/webp" : "image/jpeg"; // 非対応(Safari等)はPNGになり巨大化するためJPEG
+
+            frameTimer = setInterval(() => {
+                if (!p2pReady || !window.goSendLocalFrame || sendStartTime === null) { // P2P通信の準備が完了しているとき
+                    return;
+                }
+                const vw = video.videoWidth; // ビデオサイズ
+                const vh = video.videoHeight; // ビデオサイズ
+                if (vw === 0 || vh === 0) { // カメラ映像がまだ来ていないとき
+                    return;
+                }
+                const scale = Math.min(1, MAX_FRAME_WIDTH / vw); // 最大幅に収まるよう縮小
+                const w = Math.round(vw * scale);
+                const h = Math.round(vh * scale);
+                canvas.width = w; // ビデオサイズ更新
+                canvas.height = h; // ビデオサイズ更新
+                ctx.drawImage(video, 0, 0, w, h); // リモートフレーム描画
+                const dataURL = canvas.toDataURL(frameType, 0.7); // WebP(またはJPEG)形式，指定した圧縮率でDataURLに変換
+                const timestamp = Math.floor(performance.now() - sendStartTime); // 開始時刻からタイムスタンプ取得
+                const sequence = sendSequence++; // シーケンス番号インクリメント
+                window.goSendLocalFrame(dataURL, timestamp, sequence); // 現在のフレームを送信
+            }, 30);
+
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // 音声コンテキスト
+            const source = audioCtx.createMediaStreamSource(stream); // 音声ソース取得            
+            const processor = audioCtx.createScriptProcessor(8192, 1, 1); // バッファサイズを8192に増やしてチャンク間の継続性を向上
+
+            processor.onaudioprocess = function (event) { // 音声データが処理される度に発火する処理
+                if (!p2pReady || !window.goSendAudioChunk || sendStartTime === null) { // P2P通信の準備が完了しているとき
+                    return;
+                }
+                const input = event.inputBuffer.getChannelData(0); // ローカルの音声データ(Float32Array [-1,1])
+                const pcm16 = new Int16Array(input.length); // Float32 -> Int16 PCM に変換(精度向上)
+                for (let i = 0; i < input.length; i++) { // 入力長分繰り返し [-1, 1] -> [-32768, 32767]に変換
+                    let s = Math.max(-1, Math.min(1, input[i])); // 値取得
+                    pcm16[i] = Math.max(-32768, Math.min(32767, Math.round(s * 32767))); // スケール拡大
+                }
+                const bytes = new Uint8Array(pcm16.buffer); // 符号なし8bit配列に変換
+                let binary = ""; // バイナリ
+                for (let i = 0; i < bytes.length; i++) { // 入力長分繰り返し
+                    binary += String.fromCharCode(bytes[i]); // 文字列に変換
+                }
+                const base64 = btoa(binary); // ASCIIをbase64エンコード
+                const timestamp = Math.floor(performance.now() - sendStartTime); // タイムシーケンス付与
+                const sequence = sendSequence++; // シーケンス番号インクリメント
+                window.goSendAudioChunk(base64, timestamp, sequence); // 現在の音声データ送信
+            };
+
+            source.connect(processor); // ソースに音声処理を接続
+            processor.connect(audioCtx.destination); // 処理された音声を再生できるようにする
+            appendLog("[Sys]: Local camera & mic started."); // ログ
+        } catch (e) { // エラー時
+            console.error(e); // デバッグ用
+            alert("Failed to start camera and audio: " + e.message); // エラー
+        }
+    }
+
+    // 受信側の時刻基準(映像/音声で共有)
+    // 送信側のタイムスタンプは onP2PReady 時点起点のため、カメラ許可待ちの時間などが含まれる。
+    // 最初に受信したメディアのタイムスタンプを基準(0)として扱い、その分の遅延を表示に乗せないようにする。
+    const recvClock = { startTime: null, baseTimestamp: 0 };
+    function recvElapsed(timestamp) { // 基準からの (送信側経過時間, 受信側経過時間) を返す
+        if (recvClock.startTime === null) {
+            recvClock.startTime = performance.now();
+            recvClock.baseTimestamp = timestamp;
+        }
+        return { sent: timestamp - recvClock.baseTimestamp, elapsed: performance.now() - recvClock.startTime };
+    }
+
+    // 相手から届くタイムスタンプは信用できないため，待ち時間はこの範囲に制限する(ミリ秒)
+    const MAX_SYNC_DELAY = 1000;
+    function clampDelay(ms) {
+        return Number.isFinite(ms) ? Math.min(Math.max(ms, 0), MAX_SYNC_DELAY) : 0;
+    }
+
+    window.renderRemoteFrame = (function () { // 受信したフレーム描画
+        const SYNC_BUFFER_DELAY = 300; // 同期バッファ遅延（ミリ秒）
+        let lastDrawnSequence = -1; // 描画済みの最新シーケンス番号(古いフレームで上書きしない)
+
+        return function (dataURL, timestamp, sequence) {
+            const { sent, elapsed } = recvElapsed(timestamp); // 基準からの経過時間
+            const canvas = document.getElementById("remoteCanvas"); // キャンバス要素取得
+            const ctx = canvas.getContext("2d"); // コンテキスト取得
+            const img = new Image(); // 画像オブジェクト
+            const delay = clampDelay((sent + SYNC_BUFFER_DELAY) - elapsed); // 遅延秒数計算(上限あり)
+            const draw = () => {
+                if (sequence < lastDrawnSequence) { // 後から来た古いフレームは捨てる
+                    return;
+                }
+                lastDrawnSequence = sequence;
+                if (canvas.width !== img.width || canvas.height !== img.height) { // サイズが変わったときだけ更新(毎回の再確保を避ける)
+                    canvas.width = img.width; // キャンバスサイズ指定
+                    canvas.height = img.height; // キャンバスサイズ指定
+                }
+                ctx.drawImage(img, 0, 0); // 画像描画
+            };
+
+            img.onload = function () {
+                if (delay <= 0) { // delayが負の場合は即座に表示、正の場合は待機
+                    draw();
+                } else { // delayが正の場合
+                    setTimeout(draw, delay); // 遅延を考慮して画像を描画
+                }
+            };
+            img.onerror = function () {
+                console.error("renderRemoteFrame: failed to decode frame", sequence);
+            };
+            img.src = dataURL; // 画像のソースにdataURLを指定
+        };
+    })();
+
+     window.playRemoteAudioChunk = (function () { // 受信した音声再生
+         const audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // 音声コンテキスト取得
+         const sampleRate = audioCtx.sampleRate; // サンプリングレート取得(44100Hz または 48000Hz)
+         const SYNC_BUFFER_DELAY = 300; // 同期バッファ遅延（ミリ秒）
+         const audioQueue = []; // 音声キュー
+         const MAX_AUDIO_QUEUE = 50; // キューに溜める最大チャンク数(約 8 秒分)
+         let isPlaying = false; // 再生フラグ
+         let nextPlayTime = 0; // 次のチャンクを再生すべき時刻(audioCtx.currentTime 基準)
+         const INITIAL_BUFFER_SIZE = 5; // 初期バッファサイズ(チャンク溜めてから再生開始)
+         
+         function sortQueue() { // キューをタイムスタンプ順にソート
+             audioQueue.sort((a, b) => { // ソート
+                 if (a.timestamp !== b.timestamp) { // タイムスタンプで大小評価
+                     return a.timestamp - b.timestamp;
+                 }
+                 return a.sequence - b.sequence; // シーケンス番号で大小評価
+             });
+         }
+         function playNext() { // 順次再生する関数
+             if (audioQueue.length === 0) { // キューサイズが0のとき
+                 isPlaying = false; // 再生停止
+                 return;
+             }
+             sortQueue(); // タイムスタンプ順にソート
+             const item = audioQueue.shift(); // 1つアイテムを抜き出す
+             const { base64, timestamp, sequence } = item; // アイテムからデータ取得
+             
+             try {
+                 const binary = atob(base64); // base64をデコードしてバイナリ文字列に変換
+                 const len = binary.length; // バイナリデータサイズ
+                 const bytes = new Uint8Array(len); // 配列作成
+                 for (let i = 0; i < len; i++) { // 配列長分走査
+                     bytes[i] = binary.charCodeAt(i); // データ取得
+                 }
+                 const pcm16 = new Int16Array(bytes.buffer); // int16配列に変換
+                 const audioBuffer = audioCtx.createBuffer(1, pcm16.length, sampleRate); // バッファ作成
+                 const channel = audioBuffer.getChannelData(0); // チャンネルデータ取得
+                 for (let i = 0; i < pcm16.length; i++) { // データ長走査
+                     channel[i] = pcm16[i] / 32767.0; // Int16 -> Float32 に変換（[-32768, 32767] -> [-1, 1]）
+                 }
+                 const source = audioCtx.createBufferSource(); // ソース作成
+                 source.buffer = audioBuffer; // バッファ指定
+                 source.connect(audioCtx.destination); // 処理された音声を再生できるようにする
+                 
+                 const { sent, elapsed } = recvElapsed(timestamp); // 基準からの経過時間
+                 const delayMs = (sent + SYNC_BUFFER_DELAY) - elapsed; // 遅延時間算出
+                 const delaySeconds = clampDelay(delayMs) / 1000; // 遅延秒数取得(上限あり)
+                 const currentTime = audioCtx.currentTime; // 現在時刻取得
+                 const startTime = Math.max(currentTime, nextPlayTime) + delaySeconds; // 再生開始時刻
+                 
+                 source.onended = function() {
+                     nextPlayTime = startTime + audioBuffer.duration; // このチャンクの終了時刻を記録
+                     playNext(); // 次のチャンクを再生
+                 };
+                 source.start(startTime); // 音声を再生
+             } catch (e) { // エラー発生時
+                 console.error("playRemoteAudioChunk error", e); // デバッグ用
+                 playNext(); // 次のチャンクを再生
+             }
+         }
+         
+         return function (base64, timestamp, sequence) { // 音声再生
+             recvElapsed(timestamp); // 時刻基準を初期化(未設定のとき)
+             if (audioQueue.length >= MAX_AUDIO_QUEUE) { // 再生が追いつかないときは古いチャンクを捨てる(メモリ保護)
+                 audioQueue.shift();
+             }
+             audioQueue.push({ base64, timestamp, sequence }); // キューに追加
+             
+             if (!isPlaying) { // まだ再生していない場合
+                 if (audioQueue.length < INITIAL_BUFFER_SIZE) { // 初期バッファのとき
+                     return; // まだ溜める
+                 }
+                 isPlaying = true; // 再生開始
+                 nextPlayTime = audioCtx.currentTime + 0.1; // 100ms遅延
+                 playNext(); // 次のチャンクを再生
+             }
+         };
+     })();
+</script>
+
