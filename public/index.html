@@ -81,6 +81,7 @@
             background: var(--muted);
         }
 
+        .status[data-state="joining"] .dot,
         .status[data-state="waiting"] .dot,
         .status[data-state="connecting"] .dot { background: #f59e0b; animation: pulse 1.2s infinite; }
         .status[data-state="connected"] .dot { background: var(--success); }
@@ -306,6 +307,57 @@
         .ctrl.off svg { color: var(--danger); }
         .ctrl.active { background: var(--surface); }
 
+        /* マイク・カメラの横のデバイス選択 (^) */
+        .ctrl-group { display: flex; align-items: stretch; }
+        .caret {
+            display: grid;
+            place-items: center;
+            width: 22px;
+            margin-left: -6px;
+            padding: 0;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+        }
+
+        .caret:hover, .caret[aria-expanded="true"] { background: var(--surface); color: var(--text); }
+
+        .device-menu {
+            position: fixed;
+            z-index: 20;
+            width: min(320px, calc(100vw - 16px));
+            max-height: 50vh;
+            overflow-y: auto;
+            padding: 6px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface);
+            box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+        }
+
+        .device-menu h3 { margin: 6px 10px 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+
+        .device-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            padding: 9px 10px;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .device-item:hover, .device-item:focus-visible { background: var(--surface-2); outline: none; }
+        .device-item .check { flex: none; color: var(--accent); visibility: hidden; }
+        .device-item[aria-checked="true"] .check { visibility: visible; }
+        .device-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .device-menu .note { margin: 0; padding: 8px 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
         .badge {
             position: absolute;
             top: 4px;
@@ -339,6 +391,252 @@
 
         [hidden] { display: none !important; }
 
+        .secondary {
+            padding: 12px 24px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--surface-2);
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .secondary:hover { filter: brightness(1.15); }
+        .overlay .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+        .self { z-index: 5; } /* 待機中の案内より手前に自分の映像を出す */
+
+        .room-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: 12px;
+            padding: 3px 10px;
+            border-radius: 8px;
+            background: var(--surface);
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 400;
+        }
+
+        .room-label b { color: var(--text); font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.06em; }
+
+        /* ---- ホーム ---- */
+        .home {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            height: 100dvh;
+            overflow-y: auto;
+        }
+
+        .hero {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            padding: 24px 16px 48px;
+            text-align: center;
+        }
+
+        .hero h1 { margin: 0; font-size: clamp(26px, 5vw, 40px); font-weight: 700; }
+        .hero > p { margin: 0 0 24px; color: var(--muted); line-height: 1.7; }
+
+        .choices {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 260px));
+            gap: 16px;
+            width: 100%;
+            justify-content: center;
+        }
+
+        .choice {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            padding: 28px 20px;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            background: var(--surface);
+            text-align: center;
+            cursor: pointer;
+            transition: transform 0.15s, border-color 0.15s;
+        }
+
+        .choice:hover:not(:disabled) { transform: translateY(-2px); border-color: var(--accent); }
+        .choice:disabled { opacity: 0.5; cursor: default; }
+        .choice .icon {
+            display: grid;
+            place-items: center;
+            width: 56px;
+            height: 56px;
+            border-radius: 16px;
+            background: var(--accent);
+            color: #fff;
+        }
+
+        .choice.join .icon { background: var(--success); }
+        .choice strong { font-size: 16px; }
+        .choice span { color: var(--muted); font-size: 13px; line-height: 1.6; }
+        .home-note { color: var(--muted); font-size: 12px; min-height: 1em; }
+
+        /* ---- ダイアログ ---- */
+        dialog {
+            width: min(420px, calc(100vw - 32px));
+            padding: 0;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+        }
+
+        dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+        dialog form { display: flex; flex-direction: column; gap: 16px; padding: 24px; margin: 0; }
+        dialog h2 { margin: 0; font-size: 18px; }
+        dialog .desc { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+        .field { display: flex; flex-direction: column; gap: 6px; }
+        .field label { font-size: 13px; color: var(--muted); }
+        .field .row { display: flex; gap: 8px; }
+
+        .field input {
+            flex: 1;
+            min-width: 0;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--bg);
+            color: var(--text);
+            font: inherit;
+            outline: none;
+        }
+
+        .field input:focus { border-color: var(--accent); }
+        .field input[readonly] { font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+        .copy-btn {
+            padding: 0 14px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--surface-2);
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .copy-btn:hover { filter: brightness(1.15); }
+        .copy-btn.done { color: var(--success); }
+
+        .form-error { margin: 0; color: var(--danger); font-size: 13px; line-height: 1.5; }
+        .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+        .dialog-actions .primary, .dialog-actions .secondary { padding: 10px 20px; }
+
+        /* ---- 入室前の確認 (ロビー) ---- */
+        .lobby { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow-y: auto; }
+        .lobby-main { flex: 1; display: grid; place-items: center; padding: 8px 16px 32px; }
+
+        .lobby-card {
+            display: grid;
+            grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+            gap: 24px;
+            width: min(980px, 100%);
+            padding: 24px;
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            background: var(--surface);
+        }
+
+        .lobby-preview {
+            position: relative;
+            aspect-ratio: 16 / 9;
+            border-radius: 14px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        .lobby-preview video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .lobby-side { display: flex; flex-direction: column; gap: 18px; }
+        .lobby-side h2 { margin: 0; font-size: 20px; }
+        .lobby-side .desc { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+        .lobby-side .desc b { color: var(--text); font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: 0.06em; }
+        .device-row { display: flex; align-items: center; gap: 10px; }
+
+        .switch {
+            position: relative;
+            flex: none;
+            width: 44px;
+            height: 24px;
+            padding: 0;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface-2);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .switch::after {
+            content: "";
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--muted);
+            transition: left 0.15s, background 0.15s;
+        }
+
+        .switch[aria-checked="true"] { background: var(--accent); }
+        .switch[aria-checked="true"]::after { left: 23px; background: #fff; }
+        .switch:disabled { opacity: 0.5; cursor: default; }
+
+        .device-row select {
+            flex: 1;
+            min-width: 0;
+            padding: 8px 10px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: var(--bg);
+            color: var(--text);
+            font: inherit;
+        }
+
+        .meter { height: 6px; margin-top: 8px; border-radius: 3px; background: var(--bg); overflow: hidden; }
+        .meter span { display: block; width: 0; height: 100%; background: var(--success); transition: width 0.08s linear; }
+        .lobby-side .dialog-actions { margin-top: auto; }
+
+        @media (max-width: 760px) {
+            .lobby-card { grid-template-columns: 1fr; padding: 16px; gap: 16px; }
+        }
+
+        .options { display: flex; flex-direction: column; gap: 10px; }
+
+        .option {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 4px;
+            padding: 12px 16px;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface-2);
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .option:hover { border-color: var(--accent); }
+        .option.danger:hover { border-color: var(--danger); }
+        .option.danger strong { color: var(--danger); }
+        .option small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+        .option:disabled { opacity: 0.5; cursor: default; }
+        .host-badge { padding: 1px 6px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 11px; }
+
+        @media (max-width: 560px) {
+            .choices { grid-template-columns: 1fr; max-width: 320px; }
+            .room-label { display: none; }
+        }
+
         @media (max-width: 720px) {
             .content { padding: 0 8px; }
             .stage { border-radius: 12px; }
@@ -360,15 +658,181 @@
 </head>
 
 <body>
-    <div class="app" id="app">
+    <div class="home" id="home">
         <header class="topbar">
             <div class="brand">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
                 Video Chat
             </div>
-            <div class="status" id="status" data-state="idle">
+        </header>
+        <main class="hero">
+            <h1>ビデオ通話をはじめる</h1>
+            <p>ルームを作って相手を招待するか，<br>受け取ったルーム ID とパスワードで参加します．</p>
+            <div class="choices">
+                <button class="choice" id="createChoice" disabled>
+                    <div class="icon">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    </div>
+                    <strong>ルームを作成</strong>
+                    <span>新しいルームを作り，<br>招待リンクを相手に送ります</span>
+                </button>
+                <button class="choice join" id="joinChoice" disabled>
+                    <div class="icon">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg>
+                    </div>
+                    <strong>ルームに参加</strong>
+                    <span>ルーム ID とパスワードを<br>入力して参加します</span>
+                </button>
+            </div>
+            <p class="home-note" id="homeNote">読み込み中…</p>
+        </main>
+    </div>
+
+    <div class="lobby" id="lobby" hidden>
+        <header class="topbar">
+            <div class="brand">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
+                Video Chat
+            </div>
+        </header>
+        <main class="lobby-main">
+            <div class="lobby-card">
+                <div class="lobby-preview">
+                    <video id="lobbyVideo" autoplay muted playsinline></video>
+                    <div class="placeholder" id="lobbyPlaceholder">
+                        <div class="avatar">
+                            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5zM2 2l20 20"/></svg>
+                        </div>
+                        <span>カメラはオフです</span>
+                    </div>
+                </div>
+                <div class="lobby-side">
+                    <h2>入室の準備</h2>
+                    <p class="desc">ルーム <b id="lobbyRoom"></b> に入ります．カメラとマイクを使うかどうかを確認してから入室してください．オフのまま入室して，あとからオンにすることもできます．</p>
+                    <div class="field">
+                        <label for="camSelect">カメラ</label>
+                        <div class="device-row">
+                            <button class="switch" id="camSwitch" role="switch" aria-checked="false" aria-label="カメラのオン/オフ"></button>
+                            <select id="camSelect" aria-label="使用するカメラ"></select>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label for="micSelect">マイク</label>
+                        <div class="device-row">
+                            <button class="switch" id="micSwitch" role="switch" aria-checked="false" aria-label="マイクのオン/オフ"></button>
+                            <select id="micSelect" aria-label="使用するマイク"></select>
+                        </div>
+                        <div class="meter" aria-hidden="true"><span id="micMeter"></span></div>
+                    </div>
+                    <p class="form-error" id="lobbyError" hidden></p>
+                    <div class="dialog-actions">
+                        <button type="button" class="secondary" id="lobbyCancel">キャンセル</button>
+                        <button type="button" class="primary" id="lobbyJoin">入室する</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <dialog id="createDialog">
+        <form method="dialog" id="createForm">
+            <h2>ルームを作成</h2>
+            <p class="desc">作成したあと，カメラとマイクを確認してからルームに入ります．招待リンクは通話画面の「共有」から送れます．</p>
+            <div class="field">
+                <label for="createPassword">パスワード（任意・4〜64 文字）</label>
+                <input id="createPassword" type="text" maxlength="64" autocomplete="off" placeholder="空欄なら自動で生成します">
+            </div>
+            <p class="form-error" id="createError" hidden></p>
+            <div class="dialog-actions">
+                <button type="button" class="secondary" data-close>キャンセル</button>
+                <button type="submit" class="primary" id="createSubmit">作成して入室</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="joinDialog">
+        <form method="dialog" id="joinForm">
+            <h2>ルームに参加</h2>
+            <p class="desc">ルームを作成した人から受け取ったルーム ID とパスワードを入力してください．</p>
+            <div class="field">
+                <label for="joinRoomId">ルーム ID</label>
+                <input id="joinRoomId" type="text" maxlength="64" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+            </div>
+            <div class="field">
+                <label for="joinPassword">パスワード</label>
+                <input id="joinPassword" type="password" maxlength="64" autocomplete="off" required>
+            </div>
+            <p class="form-error" id="joinError" hidden></p>
+            <div class="dialog-actions">
+                <button type="button" class="secondary" data-close>キャンセル</button>
+                <button type="submit" class="primary" id="joinSubmit">参加</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="shareDialog">
+        <form method="dialog">
+            <h2>ルームを共有</h2>
+            <p class="desc">招待リンクを送ると，相手は開くだけでルーム ID とパスワードが入力された状態になります．リンクにはパスワードが含まれるため，招待したい相手にだけ送ってください．</p>
+            <div class="field">
+                <label for="shareUrl">招待リンク</label>
+                <div class="row">
+                    <input id="shareUrl" type="text" readonly>
+                    <button type="button" class="copy-btn" data-copy="shareUrl">コピー</button>
+                </div>
+            </div>
+            <div class="field">
+                <label for="shareRoomId">ルーム ID</label>
+                <div class="row">
+                    <input id="shareRoomId" type="text" readonly>
+                    <button type="button" class="copy-btn" data-copy="shareRoomId">コピー</button>
+                </div>
+            </div>
+            <div class="field">
+                <label for="sharePassword">パスワード</label>
+                <div class="row">
+                    <input id="sharePassword" type="text" readonly>
+                    <button type="button" class="copy-btn" data-copy="sharePassword">コピー</button>
+                </div>
+            </div>
+            <div class="dialog-actions">
+                <button type="button" class="secondary" id="nativeShare" hidden>ほかのアプリで共有</button>
+                <button type="submit" class="primary" autofocus>閉じる</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="leaveDialog">
+        <form method="dialog">
+            <h2>ルームから退出</h2>
+            <p class="desc">あなたはこのルームのホストです．退出の仕方を選んでください．</p>
+            <div class="options">
+                <button type="button" class="option" id="leaveKeep">
+                    <strong>退出する</strong>
+                </button>
+                <button type="button" class="option danger" id="leaveDelete">
+                    <strong>ルームを削除して退出</strong>
+                </button>
+            </div>
+            <p class="form-error" id="leaveError" hidden></p>
+            <div class="dialog-actions">
+                <button type="button" class="secondary" data-close>キャンセル</button>
+            </div>
+        </form>
+    </dialog>
+
+    <div class="device-menu" id="deviceMenu" role="menu" hidden></div>
+
+    <div class="app" id="app" hidden>
+        <header class="topbar">
+            <div class="brand">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
+                Video Chat
+                <span class="room-label">ルーム <b id="roomLabel"></b> <span class="host-badge" id="hostBadge" hidden>ホスト</span></span>
+            </div>
+            <div class="status" id="status" data-state="joining">
                 <span class="dot"></span>
-                <span class="label" id="statusText">未接続</span>
+                <span class="label" id="statusText">入室中</span>
                 <span class="timer" id="timer" hidden>00:00</span>
             </div>
         </header>
@@ -402,9 +866,12 @@
 
                 <div class="overlay" id="overlay">
                     <div class="spinner" id="overlaySpinner" hidden></div>
-                    <h1 id="overlayTitle">ビデオ通話を始めましょう</h1>
-                    <p id="overlayText">「通話を開始」を押すと，同じように待っている相手とつながります．カメラとマイクの使用を許可してください．</p>
-                    <button class="primary" id="overlayButton" disabled>読み込み中…</button>
+                    <h1 id="overlayTitle"></h1>
+                    <p id="overlayText"></p>
+                    <div class="actions">
+                        <button class="primary" id="overlayButton" hidden></button>
+                        <button class="secondary" id="overlayButton2" hidden></button>
+                    </div>
                 </div>
             </section>
 
@@ -420,18 +887,32 @@
         </main>
 
         <nav class="controls" aria-label="通話の操作">
-            <button class="ctrl" id="micBtn" title="マイクのオン/オフ" aria-pressed="true">
-                <svg class="on-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
-                <svg class="off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
-                <span class="label" id="micLabel">ミュート</span>
-            </button>
-            <button class="ctrl" id="camBtn" title="カメラのオン/オフ" aria-pressed="true">
-                <svg class="on-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
-                <svg class="off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5zM2 2l20 20"/></svg>
-                <span class="label" id="camLabel">ビデオの停止</span>
+            <div class="ctrl-group">
+                <button class="ctrl" id="micBtn" title="マイクのオン/オフ" aria-pressed="true">
+                    <svg class="on-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+                    <svg class="off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
+                    <span class="label" id="micLabel">ミュート</span>
+                </button>
+                <button class="caret" id="micBtnDevices" data-kind="audioinput" title="マイクを選択" aria-label="マイクを選択" aria-haspopup="menu" aria-expanded="false">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+                </button>
+            </div>
+            <div class="ctrl-group">
+                <button class="ctrl" id="camBtn" title="カメラのオン/オフ" aria-pressed="true">
+                    <svg class="on-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
+                    <svg class="off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5zM2 2l20 20"/></svg>
+                    <span class="label" id="camLabel">ビデオの停止</span>
+                </button>
+                <button class="caret" id="camBtnDevices" data-kind="videoinput" title="カメラを選択" aria-label="カメラを選択" aria-haspopup="menu" aria-expanded="false">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+                </button>
+            </div>
+
+            <button class="ctrl" id="shareBtn" title="ルームを共有">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/></svg>
+                <span class="label">共有</span>
             </button>
 
-            <button class="call-btn" id="callBtn" disabled>通話を開始</button>
 
             <button class="ctrl" id="logBtn" title="接続ログ" aria-pressed="false">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
@@ -442,6 +923,8 @@
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
                 <span class="label">全画面</span>
             </button>
+
+            <button class="call-btn leave" id="callBtn">退出</button>
         </nav>
     </div>
 
@@ -481,10 +964,6 @@
     let dataChannel = null; // RTCDataChannel (Go 側で P2P 接続を確立した後に渡される)
     let sendStartTime = null; // 送信開始タイムスタンプ
     let sendSequence = 0; // 送信シーケンス
-    let cameraStarted = false; // カメラ起動済みフラグ
-    let localStream = null; // カメラ・マイクのストリーム
-    let micOn = true; // マイクのオン/オフ
-    let camOn = true; // カメラのオン/オフ
 
     window.onP2PReady = function (ch) { // P2P 接続完了処理 (Go から呼ばれる)
         dataChannel = ch;
@@ -500,10 +979,6 @@
             appendLog("[Sys]: P2P DataChannel is ready. Start camera."); // ログ追加
             ui.setState("connected");
             sendLocalState(); // カメラ・マイクの状態を相手に伝える
-            if (!cameraStarted) {
-                cameraStarted = true;
-                startLocalCamera(); // カメラ起動&データ送信
-            }
         };
         if (ch.readyState === "open") {
             start();
@@ -512,19 +987,103 @@
         }
     };
 
-    function startVideoChat() { // ビデオ通信開始
-        if (!window.NewVideoChat) { // ビデオ通信開始処理が存在しないとき
-            return;
-        }
+    let currentRoom = null; // 入室中のルーム { id, password, hostToken } (hostToken はルームを作成した人のみ)
+
+    function enterRoom(id, password, hostToken = "") { // ルームに入る (入室前の確認画面から呼ばれる)
+        currentRoom = { id, password, hostToken };
+        rememberRoom(currentRoom); // 再読み込みしても同じルームに入り直せるように
         remoteAudioCtx.resume(); // ブラウザの自動再生制限で停止している音声出力を，クリック操作を契機に再開
-        appendLog("[Sys]: Start matchmaking..."); // ログ追加
-        ui.setState("waiting");
-        window.NewVideoChat(); // ビデオ通話開始(Go)
+        ui.showCall(id, hostToken !== "");
+        joinCurrentRoom();
     }
 
-    window.onCallStatus = function (state) { // Go から呼ばれる (waiting / connecting / failed)
-        ui.setState(state);
+    function joinCurrentRoom() { // シグナリングに入る (失敗後の再試行でも使う)
+        appendLog("[Sys]: Joining room " + currentRoom.id + "...");
+        ui.setState("joining");
+        window.NewVideoChat(currentRoom.id, currentRoom.password, currentRoom.hostToken); // ルームに入室(Go)
+    }
+
+    window.onCallStatus = function (state, reason) { // Go から呼ばれる (waiting / connecting / failed / ended)
+        ui.setState(state, reason);
     };
+
+    // ---- ルームの作成・確認 (サーバの /api/rooms) ----
+    async function roomAPI(path, body) {
+        let res;
+        try {
+            res = await fetch(path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+                cache: "no-store",
+            });
+        } catch (e) {
+            throw new Error("NETWORK");
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.error || "HTTP-" + res.status);
+        }
+        return data;
+    }
+
+    // 失敗理由 (サーバ・Go から届くコード) を表示用の文に変換
+    function reasonText(reason) {
+        const texts = {
+            "INVALID-ROOM-ID": "ルームが見つかりません．ルーム ID が違うか，ルームが削除されています（ホストの退出・削除，サーバの再起動など）．",
+            "INVALID-PASSWORD": "パスワードが違います．",
+            "LOCKED": "パスワードを何度も間違えたため，このルームにはしばらく入れません（最大 10 分）．",
+            "ROOM-FULL": "このルームにはすでに 2 人が入っています．",
+            "INVALID-PASSWORD-FORMAT": "パスワードは 4〜64 文字で指定してください．",
+            "TOO-MANY-ROOMS": "ルームが多すぎるため作成できません．しばらくしてからお試しください．",
+            "PEER-LEFT": "相手が接続の途中で退出しました．",
+            "TIMEOUT": "相手と接続できませんでした．ネットワークの制限（ファイアウォールや NAT）の可能性があります．",
+            "EXIT-RECV": "サーバとの接続が切れました．",
+            "ICE-CONNECTION-STATE-FAILED": "相手との接続に失敗しました．",
+            "NETWORK": "サーバに接続できませんでした．",
+            "ROOM-DELETED": "ホストがルームを削除しました．",
+            "NOT-HOST": "ホストではないため，この操作はできません．",
+        };
+        return texts[reason] || "接続できませんでした（" + reason + "）．";
+    }
+
+    // 再読み込み時に同じルームへ入り直すための保存 (タブを閉じると消える sessionStorage)
+    function rememberRoom(room) {
+        try {
+            if (room) {
+                sessionStorage.setItem("videoChatRoom", JSON.stringify(room));
+            } else {
+                sessionStorage.removeItem("videoChatRoom");
+            }
+        } catch (e) { /* 保存できない環境では何もしない */ }
+    }
+
+    function rememberedRoom() {
+        try {
+            const room = JSON.parse(sessionStorage.getItem("videoChatRoom") || "null");
+            if (!room || typeof room.id !== "string" || typeof room.password !== "string") {
+                return null;
+            }
+            return { id: room.id, password: room.password, hostToken: typeof room.hostToken === "string" ? room.hostToken : "" };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function inviteURL(room) { // 招待リンク (ホストトークンは含めない)．# 以降はサーバに送られないため，パスワードがサーバやトンネルのログに残らない
+        const params = new URLSearchParams({ room: room.id, pw: room.password });
+        return location.origin + location.pathname + "#" + params.toString();
+    }
+
+    function roomFromURL() { // 招待リンクで開かれたとき，ルーム ID とパスワードを取り出してアドレスバーから消す
+        const params = new URLSearchParams(location.hash.slice(1));
+        const id = params.get("room");
+        if (!id) {
+            return null;
+        }
+        history.replaceState(null, "", location.pathname + location.search);
+        return { id, password: params.get("pw") || "", hostToken: "" };
+    }
 
     const MAX_LOG_CHARS = 20000; // ログの最大文字数(相手からの大量のメッセージでメモリを圧迫しないよう古い方から捨てる)
     function appendLog(msg) { // ログ出力 (textarea の value に追記するため HTML としては解釈されない)
@@ -544,7 +1103,7 @@
 
     function sendMedia(kind, payload, maxBuffered, timestamp, sampleRate = 0) { // メディアメッセージ送信 (送れなかったら false)
         const ch = dataChannel;
-        if (!ch || ch.readyState !== "open" || ch.bufferedAmount > maxBuffered) { // 未接続・送信が詰まっているとき
+        if (!ch || sendStartTime === null || ch.readyState !== "open" || ch.bufferedAmount > maxBuffered) { // 未接続・送信が詰まっているとき
             return false;
         }
         if (HEADER_BYTES + payload.byteLength > MAX_MESSAGE_BYTES) {
@@ -566,109 +1125,212 @@
         }
     }
 
-    async function startLocalCamera() { // カメラ+マイク起動&映像フレーム/音声をDataChannel経由で送信
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: true,
-                audio: true,
-            }); // メディア起動
-            localStream = stream;
-            applyLocalState(); // 開始前に切り替えたオン/オフを反映
-            const video = document.getElementById("localVideo"); // ローカルビデオ要素取得
-            video.srcObject = stream; // ストリーム指定
+    // ---- カメラ・マイク ----
+    // 既定はどちらもオフ．オンにしたときだけデバイスを開き，オフにするとトラックを止めて解放する (カメラのランプも消える)．
+    let videoTrack = null, audioTrack = null; // 使用中のトラック
+    let camOn = false, micOn = false; // 相手に伝える状態 (トラックが動いているか)
+    const selectedDevice = { videoinput: "", audioinput: "" }; // 使用するデバイス ID (空ならブラウザの既定)
+    let localAudioCtx = null, audioProcessor = null, micAnalyser = null, micSource = null;
+    let mediaQueue = Promise.resolve(); // 切り替えを順番に処理する (連打対策)
 
-            const canvas = document.createElement("canvas"); // キャンバス要素取得
-            const ctx = canvas.getContext("2d"); // コンテキスト取得
-            const MAX_FRAME_WIDTH = 640; // 送信フレームの最大幅(DataChannelのメッセージサイズ上限対策)
-            const probe = document.createElement("canvas"); // WebPエンコード対応確認用
-            probe.width = probe.height = 1;
-            const useWebP = probe.toDataURL("image/webp").startsWith("data:image/webp"); // 非対応(Safari等)はPNGになり巨大化するためJPEG
-            const frameKind = useWebP ? KIND_WEBP : KIND_JPEG;
-            let encoding = false; // エンコード中(前のフレームが終わるまで次を作らない)
+    function serialMedia(fn) {
+        mediaQueue = mediaQueue.then(fn, fn);
+        return mediaQueue;
+    }
 
-            setInterval(() => { // 映像フレーム送信
-                const ch = dataChannel;
-                if (!camOn || encoding || !ch || ch.readyState !== "open" || ch.bufferedAmount > MAX_BUFFERED_FRAME) { // 送れないときはエンコードも省く
-                    return;
+    async function openTrack(kind) { // kind: "video" | "audio"
+        const id = selectedDevice[kind === "video" ? "videoinput" : "audioinput"];
+        const base = kind === "video" ? {} : { echoCancellation: true, noiseSuppression: true };
+        const constraints = { [kind]: id ? { ...base, deviceId: { exact: id } } : (kind === "video" ? true : base) };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const track = stream.getTracks()[0];
+        track.addEventListener("ended", () => { // デバイスが外されたときなど
+            if (track === videoTrack) setCamera(false);
+            if (track === audioTrack) setMic(false);
+        });
+        return track;
+    }
+
+    function setVideoElements() { // 自分の映像 (入室前のプレビューと通話画面の小窓)
+        for (const id of ["lobbyVideo", "localVideo"]) {
+            document.getElementById(id).srcObject = videoTrack ? new MediaStream([videoTrack]) : null;
+        }
+    }
+
+    function setCamera(on) {
+        return serialMedia(async () => {
+            if (videoTrack) {
+                videoTrack.stop();
+                videoTrack = null;
+            }
+            if (on) {
+                try {
+                    videoTrack = await openTrack("video");
+                    selectedDevice.videoinput = videoTrack.getSettings().deviceId || selectedDevice.videoinput;
+                } catch (e) {
+                    ui.mediaError("camera", e);
                 }
-                const vw = video.videoWidth; // ビデオサイズ
-                const vh = video.videoHeight; // ビデオサイズ
-                if (vw === 0 || vh === 0) { // カメラ映像がまだ来ていないとき
-                    return;
-                }
-                const scale = Math.min(1, MAX_FRAME_WIDTH / vw); // 最大幅に収まるよう縮小
-                const w = Math.round(vw * scale);
-                const h = Math.round(vh * scale);
-                if (canvas.width !== w || canvas.height !== h) {
-                    canvas.width = w; // ビデオサイズ更新
-                    canvas.height = h; // ビデオサイズ更新
-                }
-                ctx.drawImage(video, 0, 0, w, h); // 現在のフレーム描画
-                const timestamp = mediaTimestamp(); // 撮影時点のタイムスタンプ(エンコード後ではなく)
-                encoding = true;
-                // toBlob は非同期にエンコードするため，toDataURL と違いメインスレッドを止めない
-                canvas.toBlob(async (blob) => {
-                    try {
-                        if (blob) {
-                            sendMedia(frameKind, new Uint8Array(await blob.arrayBuffer()), MAX_BUFFERED_FRAME, timestamp);
-                        }
-                    } finally {
-                        encoding = false;
+            }
+            camOn = videoTrack !== null;
+            setVideoElements();
+            appendLog("[Sys]: Camera " + (camOn ? "on" : "off") + ".");
+            await refreshDevices();
+            mediaChanged();
+        });
+    }
+
+    function setMic(on) {
+        return serialMedia(async () => {
+            if (micSource) {
+                micSource.disconnect();
+                micSource = null;
+            }
+            if (audioTrack) {
+                audioTrack.stop();
+                audioTrack = null;
+            }
+            if (on) {
+                try {
+                    audioTrack = await openTrack("audio");
+                    selectedDevice.audioinput = audioTrack.getSettings().deviceId || selectedDevice.audioinput;
+                    ensureAudioPipeline();
+                    micSource = localAudioCtx.createMediaStreamSource(new MediaStream([audioTrack]));
+                    micSource.connect(audioProcessor);
+                    micSource.connect(micAnalyser);
+                } catch (e) {
+                    if (audioTrack) {
+                        audioTrack.stop();
+                        audioTrack = null;
                     }
-                }, FRAME_MIME[frameKind], 0.7);
-            }, FRAME_INTERVAL);
-
-            const audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // 音声コンテキスト
-            const source = audioCtx.createMediaStreamSource(stream); // 音声ソース取得
-            const processor = audioCtx.createScriptProcessor(2048, 1, 1); // 1 チャンク約 43ms (大きいほど録音から送信までの遅延が増える)
-
-            processor.onaudioprocess = function (event) { // 音声データが処理される度に発火する処理
-                if (!dataChannel || !micOn) { // ミュート中は送らない
-                    return;
+                    ui.mediaError("mic", e);
                 }
-                const input = event.inputBuffer.getChannelData(0); // ローカルの音声データ(Float32Array [-1,1])
-                const timestamp = mediaTimestamp(performance.now() - event.inputBuffer.duration * 1000); // チャンク先頭の録音時点
-                const pcm16 = new Int16Array(input.length); // Float32 -> Int16 PCM に変換
-                for (let i = 0; i < input.length; i++) { // [-1, 1] -> [-32767, 32767]
-                    pcm16[i] = Math.round(Math.max(-1, Math.min(1, input[i])) * 32767);
-                }
-                sendMedia(KIND_PCM16, new Uint8Array(pcm16.buffer), MAX_BUFFERED_AUDIO, timestamp, audioCtx.sampleRate); // 現在の音声データ送信
-            };
+            }
+            micOn = audioTrack !== null;
+            appendLog("[Sys]: Microphone " + (micOn ? "on" : "off") + ".");
+            await refreshDevices();
+            mediaChanged();
+        });
+    }
 
-            source.connect(processor); // ソースに音声処理を接続
-            processor.connect(audioCtx.destination); // ScriptProcessor を動かすために出力へ接続(出力は無音)
-            appendLog("[Sys]: Local camera & mic started."); // ログ
-        } catch (e) { // エラー時
-            console.error(e); // デバッグ用
-            appendLog("[Sys]: Failed to start camera and audio: " + e.message); // ログ
-            ui.mediaFailed(e);
+    function selectDevice(kind, deviceId) { // 使用するデバイスを変える (オンなら開き直す)
+        selectedDevice[kind] = deviceId;
+        if (kind === "videoinput" && camOn) {
+            setCamera(true);
+        } else if (kind === "audioinput" && micOn) {
+            setMic(true);
         }
     }
 
-    function applyLocalState() { // カメラ・マイクのオン/オフをストリームと画面に反映
-        if (localStream) {
-            localStream.getAudioTracks().forEach(t => { t.enabled = micOn; });
-            localStream.getVideoTracks().forEach(t => { t.enabled = camOn; });
+    async function refreshDevices() { // デバイス一覧 (許可前は名前が取れないため，オンにしたあとで選べる)
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            return;
         }
-        ui.localState(camOn && localStream !== null, micOn);
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            ui.setDevices(devices.filter((d) => d.deviceId && d.label), selectedDevice);
+        } catch (e) { /* 一覧が取れなくても既定のデバイスで動く */ }
     }
+
+    function stopAllMedia() {
+        for (const t of [videoTrack, audioTrack]) {
+            if (t) {
+                t.stop();
+            }
+        }
+        videoTrack = audioTrack = null;
+        camOn = micOn = false;
+    }
+
+    function mediaChanged() {
+        ui.localState(camOn, micOn);
+        sendLocalState();
+    }
+
+    function micLevel() { // マイクの入力レベル (0〜1，音量メーター用)
+        if (!micAnalyser || !micOn) {
+            return 0;
+        }
+        const buf = new Float32Array(micAnalyser.fftSize);
+        micAnalyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (const v of buf) {
+            sum += v * v;
+        }
+        return Math.min(1, Math.sqrt(sum / buf.length) * 4);
+    }
+
+    function ensureAudioPipeline() { // マイクの音声を送るための処理 (最初にマイクをオンにしたときに作る)
+        if (localAudioCtx) {
+            localAudioCtx.resume();
+            return;
+        }
+        localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioProcessor = localAudioCtx.createScriptProcessor(2048, 1, 1); // 1 チャンク約 43ms (大きいほど録音から送信までの遅延が増える)
+        micAnalyser = localAudioCtx.createAnalyser();
+        micAnalyser.fftSize = 1024;
+        audioProcessor.onaudioprocess = function (event) { // 音声データが処理される度に発火する処理
+            if (!dataChannel || !micOn) { // 未接続・ミュート中は送らない
+                return;
+            }
+            const input = event.inputBuffer.getChannelData(0); // ローカルの音声データ(Float32Array [-1,1])
+            const timestamp = mediaTimestamp(performance.now() - event.inputBuffer.duration * 1000); // チャンク先頭の録音時点
+            const pcm16 = new Int16Array(input.length); // Float32 -> Int16 PCM に変換
+            for (let i = 0; i < input.length; i++) { // [-1, 1] -> [-32767, 32767]
+                pcm16[i] = Math.round(Math.max(-1, Math.min(1, input[i])) * 32767);
+            }
+            sendMedia(KIND_PCM16, new Uint8Array(pcm16.buffer), MAX_BUFFERED_AUDIO, timestamp, localAudioCtx.sampleRate); // 現在の音声データ送信
+        };
+        audioProcessor.connect(localAudioCtx.destination); // ScriptProcessor を動かすために出力へ接続(出力は無音)
+    }
+
+    (function startFrameSender() { // 映像フレーム送信 (カメラがオンで接続中のときだけ送る)
+        const video = document.getElementById("localVideo"); // ローカルビデオ要素取得
+        const canvas = document.createElement("canvas"); // キャンバス要素取得
+        const ctx = canvas.getContext("2d"); // コンテキスト取得
+        const MAX_FRAME_WIDTH = 640; // 送信フレームの最大幅(DataChannelのメッセージサイズ上限対策)
+        const probe = document.createElement("canvas"); // WebPエンコード対応確認用
+        probe.width = probe.height = 1;
+        const useWebP = probe.toDataURL("image/webp").startsWith("data:image/webp"); // 非対応(Safari等)はPNGになり巨大化するためJPEG
+        const frameKind = useWebP ? KIND_WEBP : KIND_JPEG;
+        let encoding = false; // エンコード中(前のフレームが終わるまで次を作らない)
+
+        setInterval(() => {
+            const ch = dataChannel;
+            if (!camOn || encoding || !ch || ch.readyState !== "open" || ch.bufferedAmount > MAX_BUFFERED_FRAME) { // 送れないときはエンコードも省く
+                return;
+            }
+            const vw = video.videoWidth; // ビデオサイズ
+            const vh = video.videoHeight; // ビデオサイズ
+            if (vw === 0 || vh === 0) { // カメラ映像がまだ来ていないとき
+                return;
+            }
+            const scale = Math.min(1, MAX_FRAME_WIDTH / vw); // 最大幅に収まるよう縮小
+            const w = Math.round(vw * scale);
+            const h = Math.round(vh * scale);
+            if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w; // ビデオサイズ更新
+                canvas.height = h; // ビデオサイズ更新
+            }
+            ctx.drawImage(video, 0, 0, w, h); // 現在のフレーム描画
+            const timestamp = mediaTimestamp(); // 撮影時点のタイムスタンプ(エンコード後ではなく)
+            encoding = true;
+            // toBlob は非同期にエンコードするため，toDataURL と違いメインスレッドを止めない
+            canvas.toBlob(async (blob) => {
+                try {
+                    if (blob) {
+                        sendMedia(frameKind, new Uint8Array(await blob.arrayBuffer()), MAX_BUFFERED_FRAME, timestamp);
+                    }
+                } finally {
+                    encoding = false;
+                }
+            }, FRAME_MIME[frameKind], 0.7);
+        }, FRAME_INTERVAL);
+    })();
 
     function sendLocalState() { // カメラ・マイクの状態を相手に伝える (bit0: カメラ, bit1: マイク)
         if (sendStartTime !== null) {
             sendMedia(KIND_STATE, new Uint8Array([(camOn ? 1 : 0) | (micOn ? 2 : 0)]), MAX_BUFFERED_AUDIO, mediaTimestamp());
         }
-    }
-
-    function toggleMic() {
-        micOn = !micOn;
-        applyLocalState();
-        sendLocalState();
-    }
-
-    function toggleCam() {
-        camOn = !camOn;
-        applyLocalState();
-        sendLocalState();
     }
 
     function onRemoteMessage(event) { // 相手から届いたメッセージ
@@ -805,49 +1467,72 @@
     // ---- 画面の表示・操作 ----
     const ui = (function () {
         const $ = (id) => document.getElementById(id);
-        const app = $("app");
+        const app = $("app"), home = $("home"), lobby = $("lobby");
         const overlay = $("overlay"), overlayTitle = $("overlayTitle"), overlayText = $("overlayText");
-        const overlayButton = $("overlayButton"), overlaySpinner = $("overlaySpinner");
+        const overlayButton = $("overlayButton"), overlayButton2 = $("overlayButton2"), overlaySpinner = $("overlaySpinner");
         const status = $("status"), statusText = $("statusText"), timer = $("timer");
-        const callBtn = $("callBtn"), micBtn = $("micBtn"), camBtn = $("camBtn"), logBtn = $("logBtn"), logBadge = $("logBadge");
+        const micBtn = $("micBtn"), camBtn = $("camBtn"), logBtn = $("logBtn"), logBadge = $("logBadge");
         const remotePlaceholder = $("remotePlaceholder"), remotePlaceholderText = $("remotePlaceholderText");
+        const createDialog = $("createDialog"), joinDialog = $("joinDialog"), shareDialog = $("shareDialog"), leaveDialog = $("leaveDialog");
         let state = "loading";
         let unread = 0;
         let connectedAt = 0, timerId = null;
         let remoteCamOn = true, remoteHasFrame = false;
+        let wasmReady = false;
 
-        // 状態ごとの表示: [上部の表示, 案内のタイトル, 案内の本文, 案内のボタン(null なら非表示), 待機表示]
-        const views = {
-            idle: ["未接続", "ビデオ通話を始めましょう", "「通話を開始」を押すと，同じように待っている相手とつながります．カメラとマイクの使用を許可してください．", "通話を開始", false],
-            waiting: ["相手を待っています", "相手を探しています…", "もう一人が「通話を開始」を押すとつながります．", null, true],
-            connecting: ["接続中", "相手が見つかりました", "P2P 接続を確立しています…", null, true],
-            connected: ["通話中", "", "", null, false],
-            failed: ["接続失敗", "接続できませんでした", "時間をおいてもう一度お試しください．詳しくはログを確認してください．", "もう一度試す", false],
-            ended: ["通話終了", "通話が終了しました", "相手が退出したか，接続が切れました．", "新しい通話を始める", false],
+        // 失敗してもホームに戻らずに再試行できる理由 (パスワード違いなどは再試行しても同じなのでホームへ)
+        const retryable = (reason) => !["INVALID-ROOM-ID", "INVALID-PASSWORD", "LOCKED", "ROOM-DELETED"].includes(reason);
+
+        const goHome = () => { // 状態を確実に初期化するため再読み込み
+            rememberRoom(null);
+            location.href = location.pathname + location.search;
+        };
+        const rejoin = () => { // 同じルームに入り直す (再読み込み後に参加ダイアログが開く)
+            location.reload();
         };
 
-        function setState(next) {
-            if (state === "ended" && next !== "idle") { // 終了後に届く古い通知は無視
+        // 状態ごとの表示: [上部の表示, 案内のタイトル, 案内の本文, 待機表示]
+        const views = {
+            joining: ["入室中", "ルームに入っています…", "", true],
+            waiting: ["参加者を待っています", "", "", false], // 中央の案内は出さない (相手の映像の位置に表示)
+            connecting: ["接続中", "相手が参加しました", "P2P 接続を確立しています…", true],
+            connected: ["通話中", "", "", false],
+            failed: ["接続失敗", "接続できませんでした", "", false],
+            ended: ["通話終了", "通話が終了しました", "相手が退出したか，接続が切れました．", false],
+        };
+
+        function setButtons(primary, secondary) { // 案内のボタン ([ラベル, 処理] または null)
+            for (const [btn, def] of [[overlayButton, primary], [overlayButton2, secondary]]) {
+                btn.hidden = def === null;
+                if (def !== null) {
+                    btn.textContent = def[0];
+                    btn.onclick = def[1];
+                }
+            }
+        }
+
+        function setState(next, reason = "") {
+            if (!views[next] || (state === "ended" && (next !== "ended" || !reason))) { // 終了後に届く古い通知は無視 (理由の更新のみ受け付ける)
+                return;
+            }
+            if (state === "connected" && next === "connecting") { // ICE 再接続などの通知
                 return;
             }
             state = next;
-            const [label, title, text, button, busy] = views[next];
+            const [label, title, text, busy] = views[next];
             status.dataset.state = next;
             statusText.textContent = label;
-            overlay.hidden = next === "connected";
+            overlay.hidden = next === "connected" || next === "waiting";
             overlayTitle.textContent = title;
-            overlayText.textContent = text;
+            overlayText.textContent = next === "failed" || (next === "ended" && reason) ? reasonText(reason) : text;
             overlaySpinner.hidden = !busy;
-            overlayButton.hidden = button === null;
-            if (button !== null) {
-                overlayButton.textContent = button;
-                overlayButton.disabled = false;
+            if (next === "failed") {
+                setButtons(retryable(reason) ? ["もう一度試す", joinCurrentRoom] : null, ["ホームに戻る", goHome]);
+            } else if (next === "ended") {
+                setButtons(retryable(reason) ? ["ルームに入り直す", rejoin] : null, ["ホームに戻る", goHome]);
+            } else {
+                setButtons(null, null);
             }
-            // 下部の通話ボタン: 開始前は「通話を開始」，それ以外は「退出」
-            const canStart = next === "idle" || next === "failed";
-            callBtn.textContent = canStart ? "通話を開始" : next === "ended" ? "新しい通話" : "退出";
-            callBtn.classList.toggle("leave", !canStart && next !== "ended");
-            callBtn.disabled = false;
             if (next === "connected") {
                 connectedAt = Date.now();
                 timer.hidden = false;
@@ -869,21 +1554,10 @@
         }
 
         function updateRemotePlaceholder() {
-            const show = !remoteHasFrame || !remoteCamOn;
-            remotePlaceholder.hidden = !show;
+            remotePlaceholder.hidden = remoteHasFrame && remoteCamOn;
             remotePlaceholderText.textContent = state === "connected"
                 ? (remoteCamOn ? "相手の映像を待っています…" : "相手のカメラはオフです")
-                : "相手の映像はまだありません";
-        }
-
-        function primaryAction() { // 開始 / もう一度 / 新しい通話
-            if (state === "ended") { // 通話の状態を確実に初期化するため再読み込み
-                location.reload();
-                return;
-            }
-            callBtn.disabled = true;
-            overlayButton.disabled = true;
-            startVideoChat();
+                : state === "waiting" ? "参加者を待っています…" : "相手の映像はまだありません";
         }
 
         function setLogOpen(open) {
@@ -898,16 +1572,285 @@
             }
         }
 
-        callBtn.addEventListener("click", () => {
-            if (state === "idle" || state === "failed" || state === "ended") {
-                primaryAction();
-            } else if (confirm("通話を終了しますか？")) { // 待機中・通話中は退出 (状態を確実に初期化するため再読み込み)
-                location.reload();
+        // ---- ホームのダイアログ ----
+        function showError(id, message) {
+            const el = $(id);
+            el.textContent = message;
+            el.hidden = !message;
+        }
+
+        function openCreate() {
+            showError("createError", "");
+            $("createPassword").value = "";
+            createDialog.showModal();
+        }
+
+        let joinHostToken = { id: "", token: "" }; // 再読み込みで入り直すホストのトークン
+
+        function openJoin(room) {
+            showError("joinError", "");
+            joinHostToken = room && room.hostToken ? { id: room.id, token: room.hostToken } : { id: "", token: "" };
+            $("joinRoomId").value = room ? room.id : "";
+            $("joinPassword").value = room ? room.password : "";
+            joinDialog.showModal();
+            (room && room.password ? $("joinSubmit") : $("joinRoomId")).focus();
+        }
+
+        $("createForm").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const btn = $("createSubmit");
+            btn.disabled = true;
+            showError("createError", "");
+            try {
+                const room = await roomAPI("/api/rooms", { password: $("createPassword").value });
+                createDialog.close();
+                showLobby({ id: room.roomId, password: room.password, hostToken: room.hostToken });
+            } catch (err) {
+                showError("createError", reasonText(err.message));
+            } finally {
+                btn.disabled = false;
             }
         });
-        overlayButton.addEventListener("click", primaryAction);
-        micBtn.addEventListener("click", () => toggleMic());
-        camBtn.addEventListener("click", () => toggleCam());
+
+        $("joinForm").addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const btn = $("joinSubmit");
+            btn.disabled = true;
+            showError("joinError", "");
+            const password = $("joinPassword").value;
+            try {
+                const res = await roomAPI("/api/rooms/verify", { roomId: $("joinRoomId").value, password });
+                joinDialog.close();
+                showLobby({ id: res.roomId, password, hostToken: joinHostToken.id === res.roomId ? joinHostToken.token : "" });
+            } catch (err) {
+                showError("joinError", reasonText(err.message));
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        document.querySelectorAll("dialog [data-close]").forEach((btn) => {
+            btn.addEventListener("click", () => btn.closest("dialog").close());
+        });
+
+        // ---- 共有 ----
+        function openShare() {
+            if (!currentRoom) {
+                return;
+            }
+            $("shareUrl").value = inviteURL(currentRoom);
+            $("shareRoomId").value = currentRoom.id;
+            $("sharePassword").value = currentRoom.password;
+            shareDialog.querySelectorAll(".copy-btn").forEach((b) => { b.textContent = "コピー"; b.classList.remove("done"); });
+            if (!shareDialog.open) {
+                shareDialog.showModal();
+            }
+            for (const id of ["shareUrl", "shareRoomId", "sharePassword"]) { // 長いリンクも https:// から見えるように先頭を表示
+                const input = $(id);
+                input.setSelectionRange(0, 0);
+                input.scrollLeft = 0;
+            }
+        }
+
+        shareDialog.querySelectorAll(".copy-btn").forEach((btn) => {
+            btn.addEventListener("click", async () => {
+                const input = $(btn.dataset.copy);
+                try {
+                    await navigator.clipboard.writeText(input.value);
+                } catch (e) { // クリップボード API が使えないときは選択状態にして手動でコピーしてもらう
+                    input.select();
+                    return;
+                }
+                btn.textContent = "コピーしました";
+                btn.classList.add("done");
+            });
+        });
+
+        const nativeShare = $("nativeShare");
+        nativeShare.hidden = typeof navigator.share !== "function";
+        nativeShare.addEventListener("click", () => {
+            navigator.share({ title: "Video Chat への招待", text: "ビデオ通話に参加してください", url: inviteURL(currentRoom) }).catch(() => {});
+        });
+
+        // ---- 通話画面の操作 ----
+        $("callBtn").addEventListener("click", () => {
+            if (currentRoom && currentRoom.hostToken) { // ホストは「退出」か「ルームを削除して退出」を選ぶ
+                showError("leaveError", "");
+                leaveDialog.showModal();
+            } else if (state === "ended" || state === "failed" || confirm("ルームから退出しますか？")) {
+                goHome();
+            }
+        });
+
+        async function hostLeave(path) { // ホストの退出 (/api/rooms/leave) と削除 (/api/rooms/delete)
+            const buttons = [$("leaveKeep"), $("leaveDelete")];
+            buttons.forEach((b) => { b.disabled = true; });
+            try {
+                await roomAPI(path, { roomId: currentRoom.id, hostToken: currentRoom.hostToken });
+            } catch (err) {
+                if (err.message !== "INVALID-ROOM-ID") { // すでに消えているルームならそのまま退出
+                    showError("leaveError", reasonText(err.message));
+                    buttons.forEach((b) => { b.disabled = false; });
+                    return;
+                }
+            }
+            goHome(); // ページを離れるとシグナリングの接続が切れ，在室人数が減る
+        }
+        $("leaveKeep").addEventListener("click", () => hostLeave("/api/rooms/leave"));
+        $("leaveDelete").addEventListener("click", () => {
+            if (confirm("ルームを削除しますか？参加者も退出になり，招待リンクは使えなくなります．")) {
+                hostLeave("/api/rooms/delete");
+            }
+        });
+        $("shareBtn").addEventListener("click", openShare);
+        micBtn.addEventListener("click", () => setMic(!micOn));
+        camBtn.addEventListener("click", () => setCamera(!camOn));
+
+        // ---- 入室前の確認 (ロビー) ----
+        let lobbyRoom = null, meterId = null;
+
+        function showLobby(room) {
+            lobbyRoom = room;
+            home.hidden = true;
+            lobby.hidden = false;
+            $("lobbyRoom").textContent = room.id;
+            showError("lobbyError", "");
+            refreshDevices();
+            mediaChanged();
+            const meter = $("micMeter");
+            const loop = () => {
+                meter.style.width = Math.round(micLevel() * 100) + "%";
+                meterId = requestAnimationFrame(loop);
+            };
+            loop();
+        }
+
+        $("camSwitch").addEventListener("click", () => { showError("lobbyError", ""); setCamera(!camOn); });
+        $("micSwitch").addEventListener("click", () => { showError("lobbyError", ""); setMic(!micOn); });
+        $("camSelect").addEventListener("change", (e) => selectDevice("videoinput", e.target.value));
+        $("micSelect").addEventListener("change", (e) => selectDevice("audioinput", e.target.value));
+        $("lobbyJoin").addEventListener("click", () => {
+            cancelAnimationFrame(meterId);
+            lobby.hidden = true;
+            enterRoom(lobbyRoom.id, lobbyRoom.password, lobbyRoom.hostToken);
+        });
+        $("lobbyCancel").addEventListener("click", async () => {
+            if (lobbyRoom.hostToken) { // 作成したばかりのルームは，入室せずにやめるなら削除する
+                await roomAPI("/api/rooms/delete", { roomId: lobbyRoom.id, hostToken: lobbyRoom.hostToken }).catch(() => {});
+            }
+            stopAllMedia();
+            goHome();
+        });
+
+        // ---- 通話画面のデバイス選択メニュー (マイク・カメラの横の ^) ----
+        const deviceMenu = $("deviceMenu");
+        let lastDevices = [], menuButton = null;
+
+        function closeDeviceMenu() {
+            if (menuButton) {
+                menuButton.setAttribute("aria-expanded", "false");
+                menuButton = null;
+            }
+            deviceMenu.hidden = true;
+        }
+
+        function renderDeviceMenu() {
+            const kind = menuButton.dataset.kind;
+            const name = kind === "videoinput" ? "カメラ" : "マイク";
+            const on = kind === "videoinput" ? camOn : micOn;
+            deviceMenu.textContent = "";
+            const title = document.createElement("h3");
+            title.textContent = name + "を選択";
+            deviceMenu.append(title);
+            const list = lastDevices.filter((d) => d.kind === kind);
+            if (list.length === 0) { // 許可前は名前が取れない
+                const note = document.createElement("p");
+                note.className = "note";
+                note.textContent = name + "を一度オンにすると，使用するデバイスを選べるようになります．";
+                deviceMenu.append(note);
+            }
+            for (const d of list) {
+                const item = document.createElement("button");
+                item.className = "device-item";
+                item.setAttribute("role", "menuitemradio");
+                item.setAttribute("aria-checked", String(d.deviceId === selectedDevice[kind]));
+                item.innerHTML = '<svg class="check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg><span></span>';
+                item.querySelector("span").textContent = d.label; // デバイス名は textContent で設定 (HTML として解釈しない)
+                item.addEventListener("click", () => {
+                    closeDeviceMenu();
+                    selectDevice(kind, d.deviceId); // オンなら開き直す．オフなら次にオンにしたときに使う
+                });
+                deviceMenu.append(item);
+            }
+            if (list.length > 0 && !on) {
+                const note = document.createElement("p");
+                note.className = "note";
+                note.textContent = "選んだ" + name + "は，オンにしたときに使われます．";
+                deviceMenu.append(note);
+            }
+            // ボタンの上に表示 (画面からはみ出さないよう左右を調整)
+            const rect = menuButton.getBoundingClientRect();
+            deviceMenu.hidden = false;
+            const width = deviceMenu.offsetWidth;
+            const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, 8), window.innerWidth - width - 8);
+            deviceMenu.style.left = left + "px";
+            deviceMenu.style.bottom = (window.innerHeight - rect.top + 8) + "px";
+        }
+
+        async function openDeviceMenu(button) {
+            if (menuButton === button) { // もう一度押したら閉じる
+                closeDeviceMenu();
+                return;
+            }
+            closeDeviceMenu();
+            menuButton = button;
+            button.setAttribute("aria-expanded", "true");
+            renderDeviceMenu();
+            await refreshDevices(); // 最新の一覧で描き直す
+            if (menuButton === button) {
+                renderDeviceMenu();
+                const first = deviceMenu.querySelector(".device-item");
+                if (first) {
+                    first.focus();
+                }
+            }
+        }
+
+        for (const id of ["micBtnDevices", "camBtnDevices"]) {
+            $(id).addEventListener("click", (e) => {
+                e.stopPropagation();
+                openDeviceMenu(e.currentTarget);
+            });
+        }
+        document.addEventListener("click", (e) => { // メニューの外を押したら閉じる
+            if (menuButton && !deviceMenu.contains(e.target)) {
+                closeDeviceMenu();
+            }
+        });
+        window.addEventListener("resize", closeDeviceMenu);
+        if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) { // デバイスの抜き差し
+            navigator.mediaDevices.addEventListener("devicechange", () => refreshDevices());
+        }
+
+        function fillSelect(select, devices, kind, selectedId, active) {
+            select.textContent = "";
+            const list = devices.filter((d) => d.kind === kind);
+            if (list.length === 0) {
+                const opt = document.createElement("option");
+                opt.textContent = active ? "既定のデバイス" : "オンにすると選べます";
+                select.append(opt);
+                select.disabled = true;
+                return;
+            }
+            for (const d of list) {
+                const opt = document.createElement("option");
+                opt.value = d.deviceId;
+                opt.textContent = d.label; // textContent なので HTML として解釈されない
+                opt.selected = d.deviceId === selectedId;
+                select.append(opt);
+            }
+            select.disabled = false;
+        }
         logBtn.addEventListener("click", () => setLogOpen(!app.classList.contains("log-open")));
         $("logClose").addEventListener("click", () => setLogOpen(false));
         $("fullBtn").addEventListener("click", () => {
@@ -917,25 +1860,66 @@
                 document.documentElement.requestFullscreen().catch(() => {});
             }
         });
-        document.addEventListener("keydown", (e) => { // Esc でログを閉じる
-            if (e.key === "Escape") {
+        document.addEventListener("keydown", (e) => { // Esc でメニュー・ログを閉じる (ダイアログは標準で閉じる)
+            if (e.key !== "Escape" || document.querySelector("dialog[open]")) {
+                return;
+            }
+            if (menuButton) {
+                const button = menuButton;
+                closeDeviceMenu();
+                button.focus();
+            } else {
                 setLogOpen(false);
             }
         });
+        $("createChoice").addEventListener("click", openCreate);
+        $("joinChoice").addEventListener("click", () => openJoin(null));
+
+        // 招待リンク・再読み込みで開かれたときは参加ダイアログを入力済みで開く
+        // (音声の再生にはクリック操作が必要なため，自動では入室しない)
+        const pendingRoom = roomFromURL() || rememberedRoom();
 
         return {
             setState,
+            setDevices(devices, selected) {
+                lastDevices = devices;
+                fillSelect($("camSelect"), devices, "videoinput", selected.videoinput, camOn);
+                fillSelect($("micSelect"), devices, "audioinput", selected.audioinput, micOn);
+            },
+            showCall(roomId, isHost) { // 入室前の確認 → 通話画面
+                home.hidden = true;
+                app.hidden = false;
+                $("roomLabel").textContent = roomId;
+                $("hostBadge").hidden = !isHost;
+                document.title = "Video Chat - " + roomId;
+            },
             ready() { // WASM の読み込み完了
-                setState("idle");
+                wasmReady = true;
+                $("createChoice").disabled = false;
+                $("joinChoice").disabled = false;
+                $("homeNote").textContent = "";
+                if (pendingRoom) {
+                    openJoin(pendingRoom);
+                }
             },
             loadFailed() {
-                state = "loading";
-                overlayTitle.textContent = "読み込みに失敗しました";
-                overlayText.textContent = "ページを再読み込みしてください．";
-                overlayButton.hidden = true;
+                $("homeNote").textContent = "読み込みに失敗しました．ページを再読み込みしてください．";
             },
-            mediaFailed(e) {
-                alert("カメラ・マイクを使えませんでした: " + e.message);
+            mediaError(kind, e) { // カメラ・マイクを開けなかったとき
+                const name = kind === "camera" ? "カメラ" : "マイク";
+                const texts = {
+                    NotAllowedError: "ブラウザで" + name + "の使用が許可されていません．アドレスバーのサイト設定から許可してください．",
+                    NotFoundError: name + "が見つかりません．接続を確認してください．",
+                    NotReadableError: name + "を開けませんでした．ほかのアプリが使用している可能性があります．",
+                    OverconstrainedError: "選んだ" + name + "を開けませんでした．別のデバイスを選んでください．",
+                };
+                const message = texts[e.name] || name + "を使えませんでした（" + e.message + "）．";
+                appendLog("[Sys]: " + message);
+                if (!lobby.hidden) {
+                    showError("lobbyError", message);
+                } else {
+                    alert(message);
+                }
             },
             logAdded() {
                 if (!app.classList.contains("log-open")) {
@@ -944,15 +1928,18 @@
                     logBadge.hidden = false;
                 }
             },
-            localState(videoOn, audioOn) {
+            localState(videoOn, audioOn) { // カメラ・マイクのオン/オフを各画面に反映
                 micBtn.classList.toggle("off", !audioOn);
                 micBtn.setAttribute("aria-pressed", String(audioOn));
                 $("micLabel").textContent = audioOn ? "ミュート" : "ミュート解除";
-                camBtn.classList.toggle("off", !camOn);
-                camBtn.setAttribute("aria-pressed", String(camOn));
-                $("camLabel").textContent = camOn ? "ビデオの停止" : "ビデオの開始";
+                camBtn.classList.toggle("off", !videoOn);
+                camBtn.setAttribute("aria-pressed", String(videoOn));
+                $("camLabel").textContent = videoOn ? "ビデオの停止" : "ビデオの開始";
                 $("localMicOff").hidden = audioOn;
                 $("localPlaceholder").hidden = videoOn;
+                $("camSwitch").setAttribute("aria-checked", String(videoOn));
+                $("micSwitch").setAttribute("aria-checked", String(audioOn));
+                $("lobbyPlaceholder").hidden = videoOn;
             },
             remoteState(videoOn, audioOn) {
                 remoteCamOn = videoOn;

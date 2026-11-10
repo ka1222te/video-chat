@@ -1,3 +1,5 @@
+// このファイルは video-chat プロジェクトで変更しています (Apache License 2.0 第 4 条 (b) に基づく表示)．
+//   - reject 受信時，Disconnect でコールバックが空になる前に OnDisconnect へ拒否理由を渡すよう修正
 package ayame
 
 import (
@@ -601,8 +603,10 @@ func (c *Connection) handleMessage(rawMessage []byte) error {
 		if rejectReason == "" {
 			rejectReason = "REJECTED"
 		}
+		// Disconnect はコールバックを空にするため，先に退避してから呼ぶ (拒否理由をアプリに伝える)
+		onDisconnect := c.onDisconnectHandler
 		c.Disconnect()
-		c.onDisconnectHandler(rejectReason, nil)
+		onDisconnect(rejectReason, nil)
 	case "offer":
 		offerMsg := webrtc.SessionDescription{}
 		if err := unmarshalMessage(c, rawMessage, &offerMsg); err != nil {

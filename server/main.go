@@ -3,7 +3,7 @@
 // 1 つのポートで以下を提供する (トンネルから見て単一オリジンになるようにする)．
 //
 //	/             public/ の静的ファイル (index.html, wasm_exec.js, video-chat.wasm)
-//	/matchmaking  マッチメイキング (WebSocket)
+//	/api/rooms    ルームの作成・確認 (JSON)
 //	/signaling    シグナリング (WebSocket，Ayame 互換プロトコル)
 //	/healthz      死活確認
 package main
@@ -33,11 +33,14 @@ func main() {
 		log.Fatalf("%s/video-chat.wasm がありません．先に ./scripts/setup.sh でビルドしてください", cfg.PublicDir)
 	}
 
-	rooms := newRoomRegistry(5 * time.Minute)     // マッチング成立から 5 分間だけシグナリングに入室可能
+	store := newRoomStore() // ルーム (ID + パスワード)．メモリ上のみで，再起動すると消える
+	sig := newSignaling(store, cfg.iceServers())
 	wsLimit := make(chan struct{}, maxWebSockets) // WebSocket 同時接続数の上限
 	mux := http.NewServeMux()
-	mux.Handle("/matchmaking", limitConns(wsLimit, newMatchmaker(rooms)))
-	mux.Handle("/signaling", limitConns(wsLimit, newSignaling(rooms, cfg.iceServers())))
+	api := &roomAPI{store: store, sig: sig}
+	mux.Handle("/api/rooms", api)
+	mux.Handle("/api/rooms/", api) // verify / leave / delete
+	mux.Handle("/signaling", limitConns(wsLimit, sig))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok\n"))
 	})
@@ -68,7 +71,7 @@ func main() {
 }
 
 // maxWebSockets は WebSocket の同時接続数の上限 (超えた分は 503)．
-// マッチメイキングで待てるのは常に 1 人，シグナリングは 1 ルーム 2 人なので通常は十分に余裕がある．
+// シグナリングに接続するのは通話の準備中と，ルームで相手を待っている間だけ．
 const maxWebSockets = 256
 
 func limitConns(sem chan struct{}, h http.Handler) http.Handler {

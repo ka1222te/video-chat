@@ -25,9 +25,13 @@ type iceServer struct {
 }
 
 type sigRegisterMsg struct {
-	Type     string `json:"type"`
-	RoomID   string `json:"roomId"`
-	ClientID string `json:"clientId"`
+	Type          string  `json:"type"`
+	RoomID        string  `json:"roomId"`
+	ClientID      string  `json:"clientId"`
+	SignalingKey  *string `json:"signalingKey"` // ルームのパスワード
+	AuthnMetadata *struct {
+		HostToken string `json:"hostToken"` // ルーム作成時に発行したホストトークン (ホストのみ)
+	} `json:"authnMetadata"`
 }
 
 type sigAcceptMsg struct {
@@ -45,17 +49,18 @@ type sigRejectMsg struct {
 type sigClient struct {
 	ws       *websocket.Conn
 	clientID string
+	isHost   bool
 }
 
 type signaling struct {
 	mu         sync.Mutex
 	rooms      map[string][]*sigClient // ルームID -> 入室中のクライアント (最大 2)
-	allowed    *roomRegistry
+	store      *roomStore
 	iceServers []iceServer
 }
 
-func newSignaling(allowed *roomRegistry, ice []iceServer) *signaling {
-	return &signaling{rooms: map[string][]*sigClient{}, allowed: allowed, iceServers: ice}
+func newSignaling(store *roomStore, ice []iceServer) *signaling {
+	return &signaling{rooms: map[string][]*sigClient{}, store: store, iceServers: ice}
 }
 
 func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,8 +84,16 @@ func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reg.RoomID = normalizeRoomID(reg.RoomID)
+	password, hostToken := "", ""
+	if reg.SignalingKey != nil {
+		password = *reg.SignalingKey
+	}
+	if reg.AuthnMetadata != nil {
+		hostToken = reg.AuthnMetadata.HostToken
+	}
 	self := &sigClient{ws: ws, clientID: reg.ClientID}
-	isExist, reason := s.join(reg.RoomID, self)
+	isExist, reason := s.join(reg.RoomID, password, hostToken, self)
 	if reason != "" {
 		log.Printf("signaling: reject room=%q (%q): %s", reg.RoomID, who, reason)
 		send(ctx, ws, marshal(sigRejectMsg{Type: "reject", Reason: reason}))
@@ -88,7 +101,7 @@ func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.leave(reg.RoomID, self)
-	log.Printf("signaling: join room=%s client=%q exist=%v (%q)", reg.RoomID, reg.ClientID, isExist, who)
+	log.Printf("signaling: join room=%s client=%q host=%v exist=%v (%q)", reg.RoomID, reg.ClientID, self.isHost, isExist, who)
 
 	accept := sigAcceptMsg{Type: "accept", ConnectionID: rand.Text(), IceServers: s.iceServers, IsExistClient: isExist}
 	if err := send(ctx, ws, marshal(accept)); err != nil {
@@ -137,18 +150,19 @@ func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // join はルームに入室する．reason が空でなければ拒否．
-func (s *signaling) join(roomID string, c *sigClient) (isExist bool, reason string) {
-	if !s.allowed.valid(roomID) {
-		return false, "INVALID-ROOM-ID"
+// 通話が始まってもシグナリングの接続は保ち，接続が切れたときに退室として扱う (在室人数の管理のため)．
+func (s *signaling) join(roomID, password, hostToken string, c *sigClient) (isExist bool, reason string) {
+	isHost, err := s.store.enter(roomID, password, hostToken)
+	if err != nil {
+		_, reason := rejectStatus(err)
+		return false, reason
 	}
+	c.isHost = isHost
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	members := s.rooms[roomID]
-	if len(members) >= 2 {
-		return false, "full"
-	}
 	s.rooms[roomID] = append(members, c)
-	return len(members) == 1, ""
+	return len(members) >= 1, ""
 }
 
 // leave は退室し，残った相手に bye を送る．
@@ -169,7 +183,21 @@ func (s *signaling) leave(roomID string, c *sigClient) {
 	for _, m := range rest {
 		send(context.Background(), m.ws, marshal(map[string]string{"type": "bye"}))
 	}
-	log.Printf("signaling: leave room=%s client=%q", roomID, c.clientID)
+	deleted := s.store.exit(roomID)
+	log.Printf("signaling: leave room=%s client=%q host=%v room_deleted=%v", roomID, c.clientID, c.isHost, deleted)
+}
+
+// closeRoom はルームの全員に reject を送って切断する (ホストがルームを削除したとき)．
+func (s *signaling) closeRoom(roomID, reason string) {
+	s.mu.Lock()
+	members := append([]*sigClient(nil), s.rooms[roomID]...)
+	s.mu.Unlock()
+	for _, m := range members { // 切断の完了 (相手の応答) を待つと API の応答が遅れるため並行して行う
+		go func() {
+			send(context.Background(), m.ws, marshal(sigRejectMsg{Type: "reject", Reason: reason}))
+			m.ws.Close(websocket.StatusNormalClosure, reason)
+		}()
+	}
 }
 
 func (s *signaling) peer(roomID string, self *sigClient) *sigClient {
