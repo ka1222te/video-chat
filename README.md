@@ -43,7 +43,7 @@ Video Chat server (bin/video-chat-server, 127.0.0.1:8080)
   - the host has left with "退出" (Leave) and the number of people in the room drops to 0
   - the room has been empty for 24 hours (a safety net, e.g. when the host closes the tab without pressing Leave)
   - the server is stopped or restarted
-- Waiting WebSockets receive periodic messages, because Cloudflare closes WebSockets that are idle for about 100 seconds
+- The server sends periodic messages on open WebSockets (`/room` for the whole call, `/signaling` while connecting), because Cloudflare closes WebSockets that are idle for about 100 seconds
 - STUN / TURN servers for the P2P connection are configured in `.env` and handed to browsers during signaling
 
 ### Project Layout
@@ -244,6 +244,7 @@ When `server.log` exceeds 10 MB, it is rotated to `server.log.1` on start.
 | Stuck at "参加者を待っています" (waiting for someone to join) | Nobody has joined yet. Send the invite link from "共有" (Share) on the call screen |
 | A tile shows "接続できませんでした" (could not connect), or no video | The P2P connection with that person failed. Both sides may be behind strict NATs; configure a TURN server in `.env` |
 | "このルームは満室です" (room is full) | The room already has 4 people |
+| "サーバに接続できませんでした" (could not connect to the server) when entering | The server may be stopped, or it may have reached its limit of 1024 concurrent WebSockets (about 1024 people in calls across all rooms). Wait for others to leave and press "ルームに入り直す" (Rejoin), or raise `maxWebSockets` in `server/main.go` and rebuild |
 | Camera does not start | Make sure the page is on HTTPS or `localhost`, and that camera/microphone access is allowed in the browser |
 | WebSocket fails through gate-house | Check that gate-house's `ORIGIN_URL` matches `LISTEN_ADDR`. `origin websocket error` in gate-house's log means this server is not running |
 
@@ -272,8 +273,8 @@ The server applies the following protections.
 | Brute-force protection | 10 wrong passwords within 10 minutes temporarily block joining that room |
 | Room limit | Up to 1000 rooms at a time. Rooms that have been empty for 24 hours are deleted |
 | API protection | `/api/rooms` only accepts same-origin JSON requests (forms on other sites etc. get 403) |
-| Connection limit | Up to 256 concurrent WebSockets (503 beyond that) |
-| Security headers | CSP (no embedding in other sites, images from `data:` only, connections to the same origin only), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` |
+| Connection limit | Up to 1024 concurrent WebSockets across `/room` and `/signaling` (503 beyond that). Each participant keeps one `/room` connection for the whole call, plus one `/signaling` connection per other participant while connecting (up to 3 in a 4-person room), so about 1024 people can be in calls at once across all rooms |
+| Security headers | CSP (no embedding in other sites, images from the same origin or `data:` only, connections to the same origin only), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` |
 | Static files | Directory listings are disabled |
 
 In the browser, data received from the other user is handled as follows.

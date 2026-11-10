@@ -74,7 +74,7 @@ func main() {
 
 // maxWebSockets は WebSocket の同時接続数の上限 (超えた分は 503)．
 // 1 人あたり /room が 1 本と，接続を確立している間だけ相手ごとに /signaling が 1 本 (4 人なら最大 3 本)．
-const maxWebSockets = 256
+const maxWebSockets = 1024
 
 func limitConns(sem chan struct{}, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func limitConns(sem chan struct{}, h http.Handler) http.Handler {
 
 // contentSecurityPolicy はページが読み込めるものを必要最小限にする．
 //   - frame-ancestors 'none': 他サイトの iframe に埋め込ませない (カメラ許可のクリックジャッキング対策)
-//   - img-src 'self' data:  : 相手から届いたフレームを外部 URL として読み込ませない
+//   - img-src 'self' data:  : 画像は同じオリジンと data: だけ (外部 URL の画像を読み込ませない)
 //   - connect-src 'self'    : WebSocket は同じオリジンのみ
 //   - 'wasm-unsafe-eval'    : Go WASM の実行に必要
 //   - 'unsafe-inline'       : index.html のインラインスクリプト・style 属性に必要
