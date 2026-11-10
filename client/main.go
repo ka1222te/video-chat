@@ -1,46 +1,39 @@
 //go:build js && wasm
 // +build js,wasm
 
+// Command client はブラウザで動く Video Chat の接続処理 (Go WebAssembly)．
+//
+// 担当は接続の確立だけで，映像・音声の扱いと画面は JS (public/index.html) が行う．
+//  1. /room に入室し，在室者一覧と入退室の通知を受け取る (JS の onRoomEvent に渡す)
+//  2. 在室者ごとに go-ayame で P2P 接続を確立する (フルメッシュ．2 人の組ごとに /signaling のルームを使う)
+//  3. 確立したら RTCPeerConnection と DataChannel を JS の onPeerReady に渡す
 package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall/js"
 	"time"
 	"unsafe"
 
 	"github.com/pion/webrtc/v3"
-	"video-chat/go-ayame"
-
 	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
+	"video-chat/go-ayame"
 )
 
 const (
-	p2pConnectTimeout = 60 * time.Second // マッチング後，P2P 接続の完了を待つ上限
+	p2pConnectTimeout = 60 * time.Second // 相手との P2P 接続の完了を待つ上限
 )
 
-type mmReqMsg struct { // リクエストメッセージ(マッチメイキング用)
-	UserID    string    `json:"user_id"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type mmResMsg struct { // レスポンスメッセージ(マッチメイキング用)
-	Type      string    `json:"type"`
-	RoomID    string    `json:"room_id"`
-	UserID    string    `json:"user_id"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
 func main() {
-	// マッチメイキング・シグナリングはページと同じオリジンで提供される．
+	// ルーム・シグナリングはページと同じオリジンで提供される．
 	// トンネル経由(https)なら wss，localhost 直接(http)なら ws で接続する．
 	location := js.Global().Get("location")
 	wsScheme := "ws"
@@ -48,137 +41,274 @@ func main() {
 		wsScheme = "wss"
 	}
 	host := location.Get("host").String()
-	mmURL := url.URL{Scheme: wsScheme, Host: host, Path: "/matchmaking"}      // マッチメイキングサーバ用URL
-	signalingURL := url.URL{Scheme: wsScheme, Host: host, Path: "/signaling"} // シグナリングサーバ用URL
+	roomURL := url.URL{Scheme: wsScheme, Host: host, Path: "/room"}
+	signalingURL := url.URL{Scheme: wsScheme, Host: host, Path: "/signaling"}
 
-	now := time.Now()           // タイムスタンプ取得
-	userID, _ := shortHash(now) // ユーザID作成
-	reqMsg, err := json.Marshal(mmReqMsg{
-		UserID:    userID,
-		CreatedAt: now,
-	}) // リクエストメッセージ作成
-	if err != nil {
-		log.Fatal(err)
-	}
+	var inProgress atomic.Bool // 入室中フラグ(二重起動防止)
 
-	var resMsg mmResMsg        // レスポンスメッセージ
-	var conn *ayame.Connection // go-ayameコネクション
-	var inProgress atomic.Bool // マッチング〜接続処理の実行中フラグ(二重起動防止)
-
-	js.Global().Set("NewVideoChat", js.FuncOf(func(_ js.Value, _ []js.Value) interface{} { // マッチング開始
-		if !inProgress.CompareAndSwap(false, true) { // 実行中・接続済みなら何もしない
-			logElem("[Sys]: Already started.\n")
+	// NewVideoChat(roomId, password, hostToken) はルームに入り，在室者全員と P2P 接続を確立する．
+	// hostToken はルームを作成した人だけが持つ (参加者は空文字)．
+	js.Global().Set("NewVideoChat", js.FuncOf(func(_ js.Value, args []js.Value) interface{} {
+		if len(args) < 3 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString || args[2].Type() != js.TypeString {
 			return js.Undefined()
 		}
+		if !inProgress.CompareAndSwap(false, true) { // 実行中なら何もしない
+			logElem("[Sys]: Already started.")
+			return js.Undefined()
+		}
+		r := &room{
+			roomURL:      roomURL.String(),
+			signalingURL: signalingURL.String(),
+			peers:        map[string]*ayame.Connection{},
+		}
 		go func() {
-			connected := make(chan bool, 1)              // P2P接続完了チャンネル(ICE 再接続で複数回通知されても詰まらないようバッファ付き)
-			dcReady := make(chan *webrtc.DataChannel, 1) // DataChannel 取得チャンネル(作成側・受信側のどちらか一方から 1 回)
-			setDC := func(c *webrtc.DataChannel) {
-				c.OnClose(handleError) // 切断時
-				select {
-				case dcReady <- c:
-				default:
-				}
-			}
-			// 失敗時は log.Fatal で WASM ごと終了させず，ログを出して再試行できるようにする
-			fail := func(stage string, err error) {
-				log.Printf("%s: %v", stage, err)
-				logElem(fmt.Sprintf("[Sys]: %s failed. Please try again.\n", stage))
-				inProgress.Store(false)
-				callStatus("failed")
-			}
-			ws, _, err := websocket.Dial(context.Background(), mmURL.String(), nil) // マッチメイキングサーバ接続
-			if err != nil {
-				fail("Matchmaking", err)
-				return
-			}
-			defer ws.Close(websocket.StatusNormalClosure, "close connection") // 関数を抜けたときセッションを閉じる
-
-			if err := ws.Write(context.Background(), websocket.MessageText, reqMsg); err != nil { // テキスト形式でメッセージ送信
-				fail("Matchmaking", err)
-				return
-			}
-			logElem("[Sys]: Waiting match...\n") // ログ
-			callStatus("waiting")
-			for {
-				if err := wsjson.Read(context.Background(), ws, &resMsg); err != nil { // レスポンスメッセージ読み込み
-					fail("Matchmaking", err)
-					return
-				}
-				if resMsg.Type == "MATCH" { // 接続完了時
-					callStatus("connecting")
-					break // ブレイク
-				}
-			}
-
-			opts := ayame.DefaultOptions()                                                       // デフォルト設定(シグナリングサーバ)
-			opts.Audio.Enabled = true                                                            // 音声有効
-			opts.Audio.Direction = webrtc.RTPTransceiverDirectionSendrecv                        // 送受信有効
-			opts.Video.Enabled = true                                                            // 映像有効
-			opts.Video.Direction = webrtc.RTPTransceiverDirectionSendrecv                        // 送受信有効
-			conn = ayame.NewConnection(signalingURL.String(), resMsg.RoomID, opts, false, false) // シグナリングサーバ接続(URL，ルームID，設定，デバッグ用(SDP 等をコンソールに出さない)，websocket自動切断有効可否)
-			conn.OnOpen(func(metadata *interface{}) {                                            // Websocket接続時
-				// 後から入室した側が DataChannel を作る(先に入室した側は OnDataChannel で受け取る)
-				dc, err := conn.CreateDataChannel("video-chat", nil)
-				if err != nil {
-					return
-				}
-				setDC(dc)
-			})
-
-			conn.OnDataChannel(func(c *webrtc.DataChannel) { // DataChannel取得時
-				setDC(c)
-			})
-
-			conn.OnConnect(func() { // P2Pコネクション接続時
-				logElem("[Sys]: Matching! Start P2P video chat via DataChannel\n") // ログ
-				conn.CloseWebSocketConnection()                                    // websocket接続閉じる
-				select {
-				case connected <- true: // P2Pコネクション接続完了通知
-				default: // 通知済み(ICE 再接続など)
-				}
-			})
-
-			if err := conn.Connect(); err != nil { // P2P通信接続開始
-				fail("Signaling", err)
-				return
-			}
-			// P2P 接続と DataChannel の両方がそろうのを待つ
-			timeout := time.After(p2pConnectTimeout)
-			var dc *webrtc.DataChannel
-			for ok := false; !ok || dc == nil; {
-				select {
-				case <-connected: // P2P接続完了時
-					ok = true
-				case dc = <-dcReady: // DataChannel 取得時
-				case <-timeout: // シグナリング失敗・NAT 越え失敗などで繋がらないとき
-					conn.Disconnect()
-					fail("P2P connection", fmt.Errorf("timeout after %s", p2pConnectTimeout))
-					return
-				}
-			}
-			raw, err := rawDataChannel(dc)
-			if err != nil {
-				conn.Disconnect()
-				fail("DataChannel", err)
-				return
-			}
-			// 映像・音声の送受信は JS 側で RTCDataChannel を直接使う．
-			// Go(WASM) を経由すると 1 フレームごとに大きなデータのコピー・変換がメインスレッドで走り，
-			// 特に WASM の最適化コンパイルが終わるまでの間に処理が追いつかず映像が固まるため．
-			js.Global().Call("onP2PReady", raw) // JS側に接続完了を通知
+			r.run(args[0].String(), args[1].String(), args[2].String())
+			inProgress.Store(false)
 		}()
-		return js.Undefined() // 処理が終了しないよう未定義を返す
+		return js.Undefined()
 	}))
 	select {} // 永続待機
 }
 
-func shortHash(now time.Time) (string, error) { // ユーザID作成
-	h := sha256.New()                                        // SHA-256インスタンス
-	if _, err := h.Write([]byte(now.String())); err != nil { // 時間をハッシュ化
-		return "", err
+type room struct {
+	roomURL, signalingURL string
+	roomID, selfID, token string // token は 2 人ずつの接続のシグナリングに使う (サーバが発行)
+
+	mu    sync.Mutex
+	peers map[string]*ayame.Connection // 相手の参加者ID -> 接続 (確立中・確立済み)
+}
+
+// run は /room に入室し，退室するまで在室者の入退室に合わせて接続を張る・外す．
+func (r *room) run(roomID, password, hostToken string) {
+	ctx := context.Background()
+	ws, _, err := websocket.Dial(ctx, r.roomURL, nil)
+	if err != nil {
+		log.Printf("room: %v", err)
+		callStatus("failed", "NETWORK")
+		return
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))[:7], nil // Sumで書き込み結果を抜き出して16進数文字列の先頭7文字取得
+	defer ws.CloseNow()
+	ws.SetReadLimit(64 << 10)
+	join, _ := json.Marshal(map[string]string{"type": "join", "roomId": roomID, "password": password, "hostToken": hostToken})
+	if err := ws.Write(ctx, websocket.MessageText, join); err != nil {
+		callStatus("failed", "NETWORK")
+		return
+	}
+
+	joined := false
+	defer r.closeAll()
+	for {
+		_, raw, err := ws.Read(ctx)
+		if err != nil { // サーバの停止・ネットワークの切断など
+			if joined {
+				callStatus("ended", "EXIT-RECV")
+			} else {
+				callStatus("failed", "NETWORK")
+			}
+			return
+		}
+		var msg struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+			Token  string `json:"token"`
+			ID     string `json:"id"`
+			Self   struct {
+				ID string `json:"id"`
+			} `json:"self"`
+			Peer struct {
+				ID string `json:"id"`
+			} `json:"peer"`
+			Peers []struct {
+				ID string `json:"id"`
+			} `json:"peers"`
+		}
+		if json.Unmarshal(raw, &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "joined": // 入室できた．今いる全員とつなぐ
+			joined = true
+			r.roomID, r.selfID, r.token = normalizeRoomID(roomID), msg.Self.ID, msg.Token
+			roomEvent(raw)
+			for _, p := range msg.Peers {
+				r.connect(p.ID)
+			}
+		case "peer-joined": // 新しく入った人とつなぐ
+			roomEvent(raw)
+			r.connect(msg.Peer.ID)
+		case "peer-left":
+			r.disconnect(msg.ID)
+			roomEvent(raw)
+		case "reject": // 入室できなかった (パスワード違い・満室など)
+			callStatus("failed", msg.Reason)
+			return
+		case "closed": // ホストがルームを削除した
+			callStatus("ended", msg.Reason)
+			return
+		}
+	}
+}
+
+// connect は相手との P2P 接続を確立する (確立したら JS の onPeerReady に渡す)．
+func (r *room) connect(peerID string) {
+	if peerID == "" || peerID == r.selfID {
+		return
+	}
+	a, b := r.selfID, peerID
+	if a > b {
+		a, b = b, a
+	}
+	pairID := r.roomID + "/" + a + "-" + b // サーバの pairRoomID と同じ形
+
+	opts := ayame.DefaultOptions()                                // デフォルト設定(シグナリングサーバ)
+	opts.Audio.Enabled = true                                     // 音声のトランシーバを作る (トラックは JS が設定する)
+	opts.Audio.Direction = webrtc.RTPTransceiverDirectionSendrecv // 送受信
+	opts.Video.Enabled = true                                     // 映像のトランシーバを作る
+	opts.Video.Direction = webrtc.RTPTransceiverDirectionSendrecv // 送受信
+	opts.SignalingKey = r.token                                   // この参加者のトークン (register の signalingKey で送る)
+	// シグナリングサーバ接続(URL，ルームID，設定，デバッグ用(SDP 等をコンソールに出さない)，websocket自動切断有効可否)
+	conn := ayame.NewConnection(r.signalingURL, pairID, opts, false, false)
+
+	r.mu.Lock()
+	if old := r.peers[peerID]; old != nil {
+		r.mu.Unlock()
+		return // 接続中・接続済み
+	}
+	r.peers[peerID] = conn
+	r.mu.Unlock()
+
+	go r.establish(peerID, conn)
+}
+
+func (r *room) establish(peerID string, conn *ayame.Connection) {
+	connected := make(chan struct{}, 1)          // P2P接続完了(ICE 再接続で複数回通知されても詰まらないようバッファ付き)
+	dcReady := make(chan *webrtc.DataChannel, 1) // DataChannel 取得(作成側・受信側のどちらか一方から 1 回)
+	failed := make(chan error, 1)                // 拒否・切断など
+	var isConnected atomic.Bool
+	notify := func(ch chan struct{}) {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	fail := func(err error) {
+		select {
+		case failed <- err:
+		default:
+		}
+	}
+	setDC := func(c *webrtc.DataChannel) {
+		select {
+		case dcReady <- c:
+		default:
+		}
+	}
+
+	conn.OnOpen(func(metadata *interface{}) { // シグナリングのルームに入れたとき
+		// 後から入った側が DataChannel を作って offer を送る (先に入った側は OnDataChannel で受け取る)
+		if dc, err := conn.CreateDataChannel("video-chat", nil); err == nil {
+			setDC(dc)
+		}
+	})
+	conn.OnDataChannel(setDC)
+	conn.OnConnect(func() { // P2Pコネクション接続時
+		isConnected.Store(true)
+		notify(connected)
+	})
+	conn.OnDisconnect(func(reason string, err error) { // 拒否・シグナリング切断・ICE 失敗
+		if !isConnected.Load() {
+			fail(errors.New(reason))
+		}
+	})
+	conn.OnBye(func() { // 接続前に相手がシグナリングから抜けた
+		if !isConnected.Load() {
+			fail(errors.New("PEER-LEFT"))
+		}
+	})
+
+	if err := conn.Connect(); err != nil {
+		r.peerFailed(peerID, conn, err)
+		return
+	}
+	timeout := time.After(p2pConnectTimeout)
+	var dc *webrtc.DataChannel
+	for ok := false; !ok || dc == nil; {
+		select {
+		case <-connected:
+			ok = true
+		case dc = <-dcReady:
+		case err := <-failed:
+			r.peerFailed(peerID, conn, err)
+			return
+		case <-timeout: // NAT 越え失敗などで繋がらないとき
+			r.peerFailed(peerID, conn, errors.New("TIMEOUT"))
+			return
+		}
+	}
+	if !r.current(peerID, conn) { // 待っている間に相手が退室した
+		conn.Disconnect()
+		return
+	}
+	rawDC, err := rawDataChannel(dc)
+	pc := conn.PeerConnection()
+	if err != nil || pc == nil {
+		r.peerFailed(peerID, conn, fmt.Errorf("DATACHANNEL: %v", err))
+		return
+	}
+	conn.CloseWebSocketConnection() // 確立後はシグナリング不要 (在室の管理は /room で行う)
+	logElem("[Sys]: Connected to " + peerID + ".")
+	js.Global().Call("onPeerReady", peerID, pc.JSValue(), rawDC)
+}
+
+// peerFailed は接続できなかった相手を JS に伝える (相手が退室済みなら何もしない)．
+func (r *room) peerFailed(peerID string, conn *ayame.Connection, err error) {
+	conn.Disconnect()
+	if !r.current(peerID, conn) {
+		return
+	}
+	r.mu.Lock()
+	delete(r.peers, peerID)
+	r.mu.Unlock()
+	log.Printf("peer %s: %v", peerID, err)
+	logElem(fmt.Sprintf("[Sys]: Could not connect to %s (%v).", peerID, err))
+	js.Global().Call("onPeerFailed", peerID, err.Error())
+}
+
+func (r *room) current(peerID string, conn *ayame.Connection) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.peers[peerID] == conn
+}
+
+// disconnect は退室した相手との接続を閉じる．
+func (r *room) disconnect(peerID string) {
+	r.mu.Lock()
+	conn := r.peers[peerID]
+	delete(r.peers, peerID)
+	r.mu.Unlock()
+	if conn != nil {
+		conn.Disconnect()
+	}
+}
+
+func (r *room) closeAll() {
+	r.mu.Lock()
+	peers := r.peers
+	r.peers = map[string]*ayame.Connection{}
+	r.mu.Unlock()
+	for _, conn := range peers {
+		conn.Disconnect()
+	}
+}
+
+// normalizeRoomID はサーバと同じ規則でルームIDを整える (大文字化・空白とハイフンの除去)．
+func normalizeRoomID(id string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '-' {
+			return -1
+		}
+		return r
+	}, strings.ToUpper(strings.TrimSpace(id)))
 }
 
 // rawDataChannel は pion/webrtc (js/wasm) の DataChannel が内部に持つブラウザの RTCDataChannel を取り出す．
@@ -194,18 +324,18 @@ func rawDataChannel(dc *webrtc.DataChannel) (js.Value, error) {
 	return v, nil
 }
 
-func logElem(msg string) { // ログ表示
-	// JS 側の appendLog と同じく textarea の value に追記する (innerHTML は使わない)
-	js.Global().Call("appendLog", strings.TrimSuffix(msg, "\n"))
+// roomEvent は /room から届いたメッセージ (joined / peer-joined / peer-left) を JS に渡す．
+func roomEvent(raw []byte) {
+	js.Global().Call("onRoomEvent", string(raw))
 }
 
-// callStatus は通話の状態 (waiting / connecting / failed) を画面に伝える．
-func callStatus(status string) {
+func logElem(msg string) { // ログ表示 (JS の appendLog は textarea の value に追記するため HTML として解釈されない)
+	js.Global().Call("appendLog", msg)
+}
+
+// callStatus はルーム全体の状態 (failed / ended) と理由を画面に伝える．
+func callStatus(status, reason string) {
 	if f := js.Global().Get("onCallStatus"); f.Type() == js.TypeFunction {
-		f.Invoke(status)
+		f.Invoke(status, reason)
 	}
-}
-
-func handleError() { // エラー処理
-	logElem("[Sys]: Maybe Any left, Please restart\n") // ログ
 }

@@ -3,8 +3,9 @@
 // 1 つのポートで以下を提供する (トンネルから見て単一オリジンになるようにする)．
 //
 //	/             public/ の静的ファイル (index.html, wasm_exec.js, video-chat.wasm)
-//	/matchmaking  マッチメイキング (WebSocket)
-//	/signaling    シグナリング (WebSocket，Ayame 互換プロトコル)
+//	/api/rooms    ルームの作成・確認・退出・削除 (JSON)
+//	/room         入室と在室者一覧の通知 (WebSocket)
+//	/signaling    参加者 2 人ずつの P2P 接続のシグナリング (WebSocket，Ayame 互換プロトコル)
 //	/healthz      死活確認
 package main
 
@@ -33,11 +34,15 @@ func main() {
 		log.Fatalf("%s/video-chat.wasm がありません．先に ./scripts/setup.sh でビルドしてください", cfg.PublicDir)
 	}
 
-	rooms := newRoomRegistry(5 * time.Minute)     // マッチング成立から 5 分間だけシグナリングに入室可能
+	store := newRoomStore() // ルーム (ID + パスワード)．メモリ上のみで，再起動すると消える
+	hub := newRoomHub(store)
 	wsLimit := make(chan struct{}, maxWebSockets) // WebSocket 同時接続数の上限
 	mux := http.NewServeMux()
-	mux.Handle("/matchmaking", limitConns(wsLimit, newMatchmaker(rooms)))
-	mux.Handle("/signaling", limitConns(wsLimit, newSignaling(rooms, cfg.iceServers())))
+	api := &roomAPI{store: store, hub: hub}
+	mux.Handle("/api/rooms", api)
+	mux.Handle("/api/rooms/", api) // verify / leave / delete
+	mux.Handle("/room", limitConns(wsLimit, hub))
+	mux.Handle("/signaling", limitConns(wsLimit, newSignaling(hub, cfg.iceServers())))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok\n"))
 	})
@@ -68,8 +73,8 @@ func main() {
 }
 
 // maxWebSockets は WebSocket の同時接続数の上限 (超えた分は 503)．
-// マッチメイキングで待てるのは常に 1 人，シグナリングは 1 ルーム 2 人なので通常は十分に余裕がある．
-const maxWebSockets = 256
+// 1 人あたり /room が 1 本と，接続を確立している間だけ相手ごとに /signaling が 1 本 (4 人なら最大 3 本)．
+const maxWebSockets = 1024
 
 func limitConns(sem chan struct{}, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +90,7 @@ func limitConns(sem chan struct{}, h http.Handler) http.Handler {
 
 // contentSecurityPolicy はページが読み込めるものを必要最小限にする．
 //   - frame-ancestors 'none': 他サイトの iframe に埋め込ませない (カメラ許可のクリックジャッキング対策)
-//   - img-src 'self' data:  : 相手から届いたフレームを外部 URL として読み込ませない
+//   - img-src 'self' data:  : 画像は同じオリジンと data: だけ (外部 URL の画像を読み込ませない)
 //   - connect-src 'self'    : WebSocket は同じオリジンのみ
 //   - 'wasm-unsafe-eval'    : Go WASM の実行に必要
 //   - 'unsafe-inline'       : index.html のインラインスクリプト・style 属性に必要

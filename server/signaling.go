@@ -14,6 +14,11 @@ import (
 
 // Ayame (https://github.com/OpenAyame/ayame) 互換のシグナリング．
 // go-ayame クライアントが使う register / accept / reject / offer / answer / candidate / ping / pong / bye を扱う．
+//
+// フルメッシュの各接続 (参加者 2 人の組) ごとに 1 つのシグナリングルームを使う．
+//   - roomId は pairRoomID の形 ("<ルームID>/<参加者ID>-<参加者ID>")
+//   - signalingKey は /room の joined で受け取った，その参加者のトークン
+// 2 人とも /room に在室中で，トークンがどちらかのものである場合だけ入れる．
 
 // pingInterval は go-ayame の受信タイムアウト (90 秒) と Cloudflare の無通信切断 (約 100 秒) より短くする．
 const pingInterval = 20 * time.Second
@@ -25,9 +30,10 @@ type iceServer struct {
 }
 
 type sigRegisterMsg struct {
-	Type     string `json:"type"`
-	RoomID   string `json:"roomId"`
-	ClientID string `json:"clientId"`
+	Type         string  `json:"type"`
+	RoomID       string  `json:"roomId"`
+	ClientID     string  `json:"clientId"`
+	SignalingKey *string `json:"signalingKey"` // /room で受け取った参加者のトークン
 }
 
 type sigAcceptMsg struct {
@@ -43,19 +49,19 @@ type sigRejectMsg struct {
 }
 
 type sigClient struct {
-	ws       *websocket.Conn
-	clientID string
+	ws          *websocket.Conn
+	participant string // 参加者ID
 }
 
 type signaling struct {
 	mu         sync.Mutex
-	rooms      map[string][]*sigClient // ルームID -> 入室中のクライアント (最大 2)
-	allowed    *roomRegistry
+	rooms      map[string][]*sigClient // シグナリングルームID -> 接続中のクライアント (最大 2)
+	hub        *roomHub
 	iceServers []iceServer
 }
 
-func newSignaling(allowed *roomRegistry, ice []iceServer) *signaling {
-	return &signaling{rooms: map[string][]*sigClient{}, allowed: allowed, iceServers: ice}
+func newSignaling(hub *roomHub, ice []iceServer) *signaling {
+	return &signaling{rooms: map[string][]*sigClient{}, hub: hub, iceServers: ice}
 }
 
 func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -74,13 +80,17 @@ func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	var reg sigRegisterMsg
 	if err != nil || json.Unmarshal(raw, &reg) != nil || reg.Type != "register" || reg.RoomID == "" ||
-		len(reg.RoomID) > maxIDLen || len(reg.ClientID) > maxIDLen {
+		len(reg.RoomID) > 2*maxIDLen || len(reg.ClientID) > maxIDLen {
 		ws.Close(websocket.StatusPolicyViolation, "register required")
 		return
 	}
+	token := ""
+	if reg.SignalingKey != nil {
+		token = *reg.SignalingKey
+	}
 
-	self := &sigClient{ws: ws, clientID: reg.ClientID}
-	isExist, reason := s.join(reg.RoomID, self)
+	self := &sigClient{ws: ws}
+	isExist, reason := s.join(reg.RoomID, token, self)
 	if reason != "" {
 		log.Printf("signaling: reject room=%q (%q): %s", reg.RoomID, who, reason)
 		send(ctx, ws, marshal(sigRejectMsg{Type: "reject", Reason: reason}))
@@ -88,7 +98,6 @@ func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.leave(reg.RoomID, self)
-	log.Printf("signaling: join room=%s client=%q exist=%v (%q)", reg.RoomID, reg.ClientID, isExist, who)
 
 	accept := sigAcceptMsg{Type: "accept", ConnectionID: rand.Text(), IceServers: s.iceServers, IsExistClient: isExist}
 	if err := send(ctx, ws, marshal(accept)); err != nil {
@@ -136,46 +145,52 @@ func (s *signaling) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// join はルームに入室する．reason が空でなければ拒否．
-func (s *signaling) join(roomID string, c *sigClient) (isExist bool, reason string) {
-	if !s.allowed.valid(roomID) {
-		return false, "INVALID-ROOM-ID"
+// join は 2 人の組のシグナリングルームに入る．reason が空でなければ拒否．
+func (s *signaling) join(pairID, token string, c *sigClient) (isExist bool, reason string) {
+	m, ok := s.hub.authorizePair(pairID, token)
+	if !ok {
+		return false, "INVALID-PAIR"
 	}
+	c.participant = m.ID
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	members := s.rooms[roomID]
-	if len(members) >= 2 {
-		return false, "full"
+	members := s.rooms[pairID]
+	for _, other := range members {
+		if other.participant == c.participant { // 同じ参加者が同じ組に二重に入ることはできない
+			return false, "DUPLICATE"
+		}
 	}
-	s.rooms[roomID] = append(members, c)
+	if len(members) >= 2 {
+		return false, "ROOM-FULL"
+	}
+	s.rooms[pairID] = append(members, c)
 	return len(members) == 1, ""
 }
 
 // leave は退室し，残った相手に bye を送る．
-func (s *signaling) leave(roomID string, c *sigClient) {
+func (s *signaling) leave(pairID string, c *sigClient) {
 	s.mu.Lock()
 	var rest []*sigClient
-	for _, m := range s.rooms[roomID] {
+	for _, m := range s.rooms[pairID] {
 		if m != c {
 			rest = append(rest, m)
 		}
 	}
 	if len(rest) == 0 {
-		delete(s.rooms, roomID)
+		delete(s.rooms, pairID)
 	} else {
-		s.rooms[roomID] = rest
+		s.rooms[pairID] = rest
 	}
 	s.mu.Unlock()
 	for _, m := range rest {
 		send(context.Background(), m.ws, marshal(map[string]string{"type": "bye"}))
 	}
-	log.Printf("signaling: leave room=%s client=%q", roomID, c.clientID)
 }
 
-func (s *signaling) peer(roomID string, self *sigClient) *sigClient {
+func (s *signaling) peer(pairID string, self *sigClient) *sigClient {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, m := range s.rooms[roomID] {
+	for _, m := range s.rooms[pairID] {
 		if m != self {
 			return m
 		}

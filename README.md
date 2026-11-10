@@ -1,12 +1,13 @@
 # Video Chat
 
-A video chat application built with **Go WebAssembly** and **WebRTC P2P DataChannel**.
-Press **"START VIDEO CHAT"** to be matched with someone else who is waiting, and start a video call.
+A video chat application built with **Go WebAssembly** and **WebRTC (P2P)**.
+Someone creates a **room** (room ID + password) and sends an invite link; people who receive it join the room, and **up to 4 people** can have a video call.
+Each participant gets a random animal name (パンダ / panda, キツネ / fox, …) as a display name, unique within the room.
 
-A single server in this project serves the matchmaking server, the signaling server, and the web page on **localhost**.
+A single server in this project serves room management, the signaling server, and the web page on **localhost**.
 Exposing it to the internet is out of scope for this project; it is meant to be published through a tunnel such as Cloudflare Tunnel (e.g. [gate-house](https://github.com/ka1222te/gate-house)).
 
-> If you allow camera and microphone access, your video and audio are sent to the other user.
+> Camera and microphone are turned on in the check screen before entering (they start off). Once on, your video and audio are sent to everyone in the room.
 
 <img src="./assets/sample.png" width="400">
 
@@ -22,17 +23,27 @@ Tunnel (e.g. gate-house + Cloudflare Quick Tunnel)   ← outside this project
    ▼
 Video Chat server (bin/video-chat-server, 127.0.0.1:8080)
    ├ /             Web page (public/index.html, wasm_exec.js, video-chat.wasm)
-   ├ /matchmaking  Matchmaking (WebSocket) … pairs the first two users and issues a room ID
-   └ /signaling    Signaling (WebSocket, Ayame-compatible) … relays SDP / ICE candidates
+   ├ /api/rooms    Room creation, pre-join check, leave and delete (JSON) … issues and verifies room IDs and passwords
+   ├ /room         Entering the room and the participant list (WebSocket) … checks the password, assigns display names, and notifies everyone of joins and leaves
+   └ /signaling    Signaling (WebSocket, Ayame-compatible) … relays SDP / ICE candidates for each pair of participants
 
-   Once connected, video and audio flow directly (P2P) between A and B over a WebRTC DataChannel
+   Video and audio flow directly (P2P) between every pair of participants (full mesh; with 4 people, 3 connections each)
+   Media uses standard WebRTC tracks; camera/microphone on/off notices use a DataChannel
 ```
 
-- All three functions are served from **one port (a single origin)**, so a tunnel with a single public URL is enough
-- The browser side (Go WASM) derives its endpoints from the page URL (`https://` → `wss://<same host>/...`, `http://` → `ws://`).
+- Everything is served from **one port (a single origin)**, so a tunnel with a single public URL is enough
+- In the browser, Go WASM only establishes connections (entering the room and signaling); JS handles media and the UI.
+  The endpoints are derived from the page URL (`https://` → `wss://<same host>/...`, `http://` → `ws://`).
   No rebuild is needed when the public URL changes
-- Signaling only accepts room IDs issued by matchmaking (valid for 5 minutes, up to 2 users per room)
-- Waiting WebSockets receive periodic messages, because Cloudflare closes WebSockets that are idle for about 100 seconds
+- A room holds up to 4 people. A newcomer and everyone already in the room each open a one-to-one P2P connection
+- Everyone receives the same video, so the per-connection quality drops as the room fills up (2 people: up to 1.5 Mbps / 30 fps / 1280 px, 3: 800 kbps / 24 fps / 960 px, 4: 500 kbps / 20 fps / 640 px)
+- Presence is tracked with the `/room` WebSocket, which stays open during the call; leaving the page closes it and counts as leaving the room (signaling closes once a connection is established)
+- Rooms are kept only in the server's memory and are deleted when
+  - the person who created the room (the host) chooses "ルームを削除して退出" (Delete room and leave); anyone still in the room is removed as well
+  - the host has left with "退出" (Leave) and the number of people in the room drops to 0
+  - the room has been empty for 24 hours (a safety net, e.g. when the host closes the tab without pressing Leave)
+  - the server is stopped or restarted
+- The server sends periodic messages on open WebSockets (`/room` for the whole call, `/signaling` while connecting), because Cloudflare closes WebSockets that are idle for about 100 seconds
 - STUN / TURN servers for the P2P connection are configured in `.env` and handed to browsers during signaling
 
 ### Project Layout
@@ -40,7 +51,7 @@ Video Chat server (bin/video-chat-server, 127.0.0.1:8080)
 | Path | Contents |
 |---|---|
 | `client/` | Go WASM that runs in the browser (video chat client) |
-| `server/` | Local server (static files, matchmaking, signaling) |
+| `server/` | Local server (static files, room management, signaling) |
 | `go-ayame/` | Ayame client library (Apache License 2.0, see [NOTICE](NOTICE)) |
 | `public/` | Files served to browsers. Everything except `index.html` is generated by the build |
 | `scripts/` | `setup.sh` (setup / build), `start.sh` (start), `stop.sh` (stop). Can be run from any directory |
@@ -144,7 +155,8 @@ Changes take effect after restarting the server.
 ```
 
 Stops the server with SIGTERM, and kills it if it has not exited within 10 seconds.
-Calls that are already connected keep going, because their video and audio flow directly P2P; only new matches stop working.
+Video and audio flow directly P2P, but stopping the server cuts presence tracking (`/room`), so calls end as well.
+However, rooms exist only in memory, so **stopping or restarting the server deletes all rooms** (and their invite links stop working).
 
 ### Restart
 
@@ -163,7 +175,7 @@ Calls that are already connected keep going, because their video and audio flow 
 ### 5.1 Try It Locally
 
 Open <http://localhost:8080/> in a browser on the server machine.
-Open two tabs and press "START VIDEO CHAT" in each to call yourself.
+Create a room in one tab, then open the invite link from "共有" (Share) on the call screen in more tabs (up to 4 in total) and join, to call yourself.
 
 ### 5.2 Publish Through a Tunnel (gate-house example)
 
@@ -183,7 +195,8 @@ With [gate-house](https://github.com/ka1222te/gate-house), you can publish the a
    ./scripts/stop.sh && ./scripts/start.sh
    ```
 
-4. Users open gate-house's public URL, log in with Google, and press "START VIDEO CHAT"
+4. Users open gate-house's public URL, log in with Google, and create or join a room ([5.3](#53-creating-and-joining-rooms)).
+   People who receive an invite link are also asked to log in with Google when they open it
 
 Notes:
 
@@ -191,11 +204,27 @@ Notes:
 - For connections through gate-house, the server log (`.state/server.log`) records the logged-in user's email address
 - Running a Quick Tunnel directly with `cloudflared tunnel --url http://127.0.0.1:8080` (without gate-house) also works, but then anyone who knows the URL can access it
 
-### 5.3 Logs and Status
+### 5.3 Creating and Joining Rooms
+
+| Action | Steps |
+|---|---|
+| Create a room | Press "ルームを作成" (Create room) on the home screen. The password is optional (4–64 characters; generated automatically if left empty) |
+| Check before entering | After creating or joining, a check screen opens. Camera and microphone start off; turning them on shows a preview and a level meter, and lets you pick the device. Press "入室する" (Enter) to join the room (pressing "キャンセル" (Cancel) for a room you just created deletes it) |
+| Switch devices during a call | Press the "^" next to the microphone / camera button on the call screen and pick one from the list |
+| Invite someone | Press "共有" (Share) on the call screen and copy the invite link, room ID, or password to send |
+| Join with an invite link | Opening the link shows the join dialog with the room ID and password filled in; press "参加" (Join) |
+| Join with ID and password | Press "ルームに参加" (Join room) on the home screen and enter them |
+| Leave | Press "退出" (Leave) on the call screen to return home. The host chooses between "退出する" (Leave) and "ルームを削除して退出" (Delete room and leave) |
+| Rejoin | When the call drops, press "ルームに入り直す" (Rejoin), or reload the page (in the same tab, the join dialog opens pre-filled, and the host stays the host) |
+
+Invite links look like `https://<public URL>/#room=<room ID>&pw=<password>`. Browsers never send the part after `#` to the server, so the password does not end up in this server's or gate-house's access logs.
+It is removed from the address bar once the page opens.
+
+### 5.4 Logs and Status
 
 | Task | How |
 |---|---|
-| View logs | `tail -f .state/server.log` (matches, joins and leaves) |
+| View logs | `tail -f .state/server.log` (room creation, joins, leaves, and wrong passwords) |
 | Check status | `curl http://127.0.0.1:8080/healthz`, or `ps -p $(cat .state/server.pid)` |
 
 When `server.log` exceeds 10 MB, it is rotated to `server.log.1` on start.
@@ -209,9 +238,13 @@ When `server.log` exceeds 10 MB, it is rotated to `server.log.1` on start.
 | `go が見つかりません` (go not found) | Install Go, or set `GO='/path/to/go'` in `.env` |
 | `既に起動中です` (already running) | To restart, run `./scripts/stop.sh && ./scripts/start.sh` |
 | `サーバがすぐに終了しました` (server exited immediately) | Check the log shown. For `address already in use`, change the port in `LISTEN_ADDR` (and gate-house's `ORIGIN_URL`) |
-| `WASM is not initialized yet.` | The page has just loaded; wait a few seconds. If it persists, rebuild with `./scripts/setup.sh` and reload |
-| Stuck at `Waiting match...` | Nobody else is waiting yet. Press "START VIDEO CHAT" from another user (or another tab) |
-| No video after matching | The P2P connection failed. Both users may be behind strict NATs; configure a TURN server in `.env` |
+| Home buttons are disabled ("読み込み中…" / loading) | The WASM is loading. If it persists, rebuild with `./scripts/setup.sh` and reload |
+| "ルームが見つかりません" (room not found) | The room ID is wrong, or the room has been deleted (the host left or deleted it, it was empty for 24 hours, or the server restarted). Create a new room |
+| "パスワードを何度も間違えたため…" (too many wrong passwords) | 10 wrong passwords within 10 minutes lock the room temporarily. Wait, or create a new room |
+| Stuck at "参加者を待っています" (waiting for someone to join) | Nobody has joined yet. Send the invite link from "共有" (Share) on the call screen |
+| A tile shows "接続できませんでした" (could not connect), or no video | The P2P connection with that person failed. Both sides may be behind strict NATs; configure a TURN server in `.env` |
+| "このルームは満室です" (room is full) | The room already has 4 people |
+| "サーバに接続できませんでした" (could not connect to the server) when entering | The server may be stopped, or it may have reached its limit of 1024 concurrent WebSockets (about 1024 people in calls across all rooms). Wait for others to leave and press "ルームに入り直す" (Rejoin), or raise `maxWebSockets` in `server/main.go` and rebuild |
 | Camera does not start | Make sure the page is on HTTPS or `localhost`, and that camera/microphone access is allowed in the browser |
 | WebSocket fails through gate-house | Check that gate-house's `ORIGIN_URL` matches `LISTEN_ADDR`. `origin websocket error` in gate-house's log means this server is not running |
 
@@ -219,10 +252,13 @@ When `server.log` exceeds 10 MB, it is rotated to `server.log.1` on start.
 
 ## 7. Security Notes
 
-- **Your IP address is visible to the other user.** Video and audio flow directly (P2P) between browsers, so each side learns the other's IP address while connecting.
+- **Your IP address is visible to everyone in the room.** Video and audio flow directly (P2P) between participants, so each side learns the others' IP addresses while connecting.
   Share the public URL only with people you trust (with gate-house, access can be limited to users allowed via Google login)
-- **This server has no access control of its own.** Who can use the app is controlled on the tunnel side (e.g. gate-house's allow list).
-  Keep `LISTEN_ADDR` on `127.0.0.1` so that the server cannot be reached except through the tunnel
+- **Room passwords limit who you talk to; they are not access control for the site.** Anyone who can open the page can create rooms.
+  Control who can use the site on the tunnel side (e.g. gate-house's allow list), and keep `LISTEN_ADDR` on `127.0.0.1` so that the server cannot be reached except through the tunnel
+- **Invite links contain the password.** Anyone with the link can join the room, so send it only to the people you want to invite.
+  If you choose your own password, make it hard to guess (leaving it empty generates a random 12-character one)
+- The host is identified by a secret value (host token) given only to the host's browser when the room is created. It is not part of the invite link and is stored only in that tab's sessionStorage
 - **TURN credentials are handed out to users' browsers.** `TURN_USERNAME` / `TURN_CREDENTIAL` in `.env` are sent to every user during signaling,
   so use credentials dedicated to this app with limited privileges, not a reused password
 - Update Go to the latest release regularly to pick up security fixes, and rebuild with `./scripts/setup.sh && ./scripts/stop.sh && ./scripts/start.sh`
@@ -232,17 +268,20 @@ The server applies the following protections.
 | Protection | Details |
 |---|---|
 | WebSocket origin check | Only connections from same-origin pages are accepted (others get 403) |
-| Room ID validation | Signaling only accepts room IDs issued by matchmaking (unguessable random values, valid for 5 minutes), up to 2 users per room |
-| Connection limit | Up to 256 concurrent WebSockets (503 beyond that) |
-| Security headers | CSP (no embedding in other sites, images from `data:` only, connections to the same origin only), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` |
+| Room check | Only existing room ID + password pairs are accepted, up to 4 people per room. Passwords are stored as salted hashes and compared in constant time |
+| Signaling check | The signaling room for a pair only admits those two people (checked with a token the server issues on entry) |
+| Brute-force protection | 10 wrong passwords within 10 minutes temporarily block joining that room |
+| Room limit | Up to 1000 rooms at a time. Rooms that have been empty for 24 hours are deleted |
+| API protection | `/api/rooms` only accepts same-origin JSON requests (forms on other sites etc. get 403) |
+| Connection limit | Up to 1024 concurrent WebSockets across `/room` and `/signaling` (503 beyond that). Each participant keeps one `/room` connection for the whole call, plus one `/signaling` connection per other participant while connecting (up to 3 in a 4-person room), so about 1024 people can be in calls at once across all rooms |
+| Security headers | CSP (no embedding in other sites, images from the same origin or `data:` only, connections to the same origin only), `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` |
 | Static files | Directory listings are disabled |
 
 In the browser, data received from the other user is handled as follows.
 
-- Video and audio arrive as binary data, and the image format (WebP / JPEG) is decided by the receiver, so the other user cannot make the page load external URLs
-- When sending cannot keep up with the connection, video frames are skipped so that latency does not keep growing
-- Text messages are truncated to 500 characters and shown as plain text, never interpreted as HTML
-- Delays derived from the other user's timestamps are capped at 1 second, and audio that falls more than 0.25 seconds behind schedule is dropped to catch up
+- Video and audio arrive as standard WebRTC tracks played by the browser (encrypted with DTLS-SRTP, so they cannot be altered between sender and receiver)
+- The DataChannel only accepts camera/microphone on/off notices. Text messages are truncated to 500 characters and shown as plain text, never interpreted as HTML
+- Strings from other users or the server, such as display names, are always shown with textContent (never interpreted as HTML)
 
 ## 8. License
 
@@ -274,7 +313,6 @@ See [LICENSE](LICENSE) for the Apache License 2.0 text and [NOTICE](NOTICE) for 
 
 ### Compatible Protocols
 
-Signaling follows the message format of [OpenAyame/ayame](https://github.com/OpenAyame/ayame) (Apache License 2.0),
-and matchmaking follows that of [ponyo877/easy-matchmaking](https://github.com/ponyo877/easy-matchmaking). Both are implemented independently in this project; their source code is not included.
+Signaling follows the message format of [OpenAyame/ayame](https://github.com/OpenAyame/ayame) (Apache License 2.0), implemented independently in this project; the Ayame server's source code is not included.
 
 The tunnel used for public access (gate-house, Cloudflare, etc.) is not part of this project. If you use one, follow its license and terms of service.

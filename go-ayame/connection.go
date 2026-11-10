@@ -1,3 +1,8 @@
+// このファイルは video-chat プロジェクトで変更しています (Apache License 2.0 第 4 条 (b) に基づく表示)．
+//   - reject 受信時，Disconnect でコールバックが空になる前に OnDisconnect へ拒否理由を渡すよう修正
+//   - 映像・音声のトランシーバは offer を送る側だけが作り，受け手は offer から作られたものを送受信にする
+//     (addTransceiver で作ったトランシーバは受信した offer に再利用されず，受け手が送信できないため)
+//   - PeerConnection() を追加 (アプリ側でトラックを設定するため)
 package ayame
 
 import (
@@ -126,6 +131,11 @@ func (c *Connection) CreateDataChannel(label string, options *webrtc.DataChannel
 		return dc, nil
 	}
 	return nil, fmt.Errorf("client does not exist")
+}
+
+// PeerConnection は現在の PeerConnection を返します (未作成なら nil)。
+func (c *Connection) PeerConnection() *webrtc.PeerConnection {
+	return c.pc
 }
 
 // OnOpen は open イベント発生時のコールバック関数を設定します。
@@ -263,7 +273,8 @@ func (c *Connection) createPeerConnection() error {
 		return err
 	}
 
-	if c.Options.Audio.Enabled {
+	// 受け手 (isExistClient == false) は offer を受け取ってから setOffer でトランシーバを整える
+	if c.Options.Audio.Enabled && c.isExistClient {
 		_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RtpTransceiverInit{
 			Direction: c.Options.Audio.Direction,
 		})
@@ -272,7 +283,7 @@ func (c *Connection) createPeerConnection() error {
 		}
 	}
 
-	if c.Options.Video.Enabled {
+	if c.Options.Video.Enabled && c.isExistClient {
 		_, err = pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RtpTransceiverInit{
 			Direction: c.Options.Video.Direction,
 		})
@@ -399,6 +410,7 @@ func (c *Connection) setOffer(sessionDescription webrtc.SessionDescription) erro
 		return err
 	}
 	c.trace("set offer sdp=%s", sessionDescription.SDP)
+	setTransceiverDirections(c.pc, c.Options) // offer から作られたトランシーバを送受信にする
 	err = c.createAnswer()
 	if err != nil {
 		return err
@@ -601,8 +613,10 @@ func (c *Connection) handleMessage(rawMessage []byte) error {
 		if rejectReason == "" {
 			rejectReason = "REJECTED"
 		}
+		// Disconnect はコールバックを空にするため，先に退避してから呼ぶ (拒否理由をアプリに伝える)
+		onDisconnect := c.onDisconnectHandler
 		c.Disconnect()
-		c.onDisconnectHandler(rejectReason, nil)
+		onDisconnect(rejectReason, nil)
 	case "offer":
 		offerMsg := webrtc.SessionDescription{}
 		if err := unmarshalMessage(c, rawMessage, &offerMsg); err != nil {
