@@ -22,8 +22,8 @@ import (
 //	POST /api/rooms/leave   {"roomId", "hostToken"}    -> 200 (ホストの退出)
 //	POST /api/rooms/delete  {"roomId", "hostToken"}    -> 200 (ホストによるルームの削除)
 //
-// パスワードを省略するとサーバが生成する．シグナリングの register でも同じ確認を行い，
-// register の authnMetadata.hostToken が正しければその接続をホストとして扱う．
+// パスワードを省略するとサーバが生成する．入室 (/room の join) でも同じ確認を行い，
+// hostToken が正しければその参加者をホストとして扱う．
 //
 // ルームが削除されるのは次のとき．
 //   - ホストが「ルームを削除して退出」したとき (delete) … 在室中の参加者も退室させる
@@ -42,7 +42,7 @@ const (
 	failureWindow    = 10 * time.Minute                  // この期間ロックする (総当たり対策)
 	passwordAlphabet = "23456789abcdefghjkmnpqrstuvwxyz" // 見間違えやすい 0/o/1/l/i を除く
 	roomAPIBodyLimit = 4 << 10
-	roomCapacity     = 2 // 1 ルームの最大人数 (1 対 1 の P2P 通話)
+	roomCapacity     = 4 // 1 ルームの最大人数 (全員が互いに P2P でつなぐため，人数が増えるほど各自の送信量が増える)
 )
 
 var (
@@ -59,7 +59,7 @@ type room struct {
 	salt       [16]byte
 	hash       [32]byte    // sha256(salt || password)
 	hostHash   [32]byte    // sha256(hostToken)
-	occupants  int         // シグナリングに接続中の人数 (通話中も接続を保つ)
+	occupants  int         // /room に接続中の人数 (通話中も接続を保つ)
 	hostLeft   bool        // ホストが退出ボタンで退出した
 	lastActive time.Time   // 最後に入室・退室があった時刻
 	failures   []time.Time // 直近のパスワード誤り
@@ -156,7 +156,7 @@ func (s *roomStore) verify(id, password string) error {
 	return nil
 }
 
-// enter は入室する (シグナリングの register 時)．退室時は必ず exit を呼ぶ．
+// enter は入室する (/room の join 時)．退室時は必ず exit を呼ぶ．
 func (s *roomStore) enter(id, password, hostToken string) (isHost bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -278,7 +278,7 @@ func normalizeRoomID(id string) string {
 // roomAPI は /api/rooms 以下を処理する．
 type roomAPI struct {
 	store *roomStore
-	sig   *signaling // ルーム削除時に在室者を退室させる
+	hub   *roomHub // ルーム削除時に在室者を退室させる
 }
 
 func (a *roomAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -343,7 +343,7 @@ func (a *roomAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, status, reason)
 			return
 		}
-		a.sig.closeRoom(id, "ROOM-DELETED")
+		a.hub.closeRoom(id, "ROOM-DELETED")
 		log.Printf("rooms: deleted room=%s by host (%q)", id, who)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": true})
 	default:

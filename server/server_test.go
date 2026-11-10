@@ -18,12 +18,13 @@ import (
 func newTestServer(t *testing.T) (*httptest.Server, *roomStore) {
 	t.Helper()
 	store := newRoomStore()
-	sig := newSignaling(store, []iceServer{{URLs: []string{"stun:stun.example:3478"}}})
-	api := &roomAPI{store: store, sig: sig}
+	hub := newRoomHub(store)
+	api := &roomAPI{store: store, hub: hub}
 	mux := http.NewServeMux()
 	mux.Handle("/api/rooms", api)
 	mux.Handle("/api/rooms/", api) // verify / leave / delete
-	mux.Handle("/signaling", sig)
+	mux.Handle("/room", hub)
+	mux.Handle("/signaling", newSignaling(hub, []iceServer{{URLs: []string{"stun:stun.example:3478"}}}))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, store
@@ -52,99 +53,55 @@ func postJSON(t *testing.T, srv *httptest.Server, path string, body any) (int, m
 	return res.StatusCode, out
 }
 
-func register(t *testing.T, ctx context.Context, srv *httptest.Server, roomID, password, client string) (*websocket.Conn, map[string]any) {
+type testRoom struct{ id, password, hostToken string }
+
+func createRoom(t *testing.T, srv *httptest.Server) testRoom {
 	t.Helper()
-	ws := dial(t, ctx, srv, "/signaling")
-	wsjson.Write(ctx, ws, sigRegisterMsg{Type: "register", RoomID: roomID, ClientID: client, SignalingKey: &password})
+	code, res := postJSON(t, srv, "/api/rooms", map[string]string{})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, res)
+	}
+	return testRoom{res["roomId"].(string), res["password"].(string), res["hostToken"].(string)}
+}
+
+// joinRoom は /room に入室し，最初の応答 (joined または reject) を返す．
+func joinRoom(t *testing.T, ctx context.Context, srv *httptest.Server, roomID, password, hostToken string) (*websocket.Conn, map[string]any) {
+	t.Helper()
+	ws := dial(t, ctx, srv, "/room")
+	wsjson.Write(ctx, ws, map[string]string{"type": "join", "roomId": roomID, "password": password, "hostToken": hostToken})
 	var res map[string]any
 	if err := wsjson.Read(ctx, ws, &res); err != nil {
-		t.Fatalf("register %s: %v", client, err)
+		t.Fatalf("join: %v", err)
 	}
 	return ws, res
 }
 
-// ルームを作成し，同じルームに入った 2 人の間でシグナリングのメッセージが届くこと
-func TestRoomAndSignal(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	srv, _ := newTestServer(t)
-
-	code, created := postJSON(t, srv, "/api/rooms", map[string]string{})
-	roomID, _ := created["roomId"].(string)
-	password, _ := created["password"].(string)
-	if code != http.StatusCreated || len(roomID) != roomIDLen || len(password) != genPasswordLen {
-		t.Fatalf("create: %d %v", code, created)
-	}
-
-	// 参加前の確認 (ルームIDは小文字・ハイフン入りでもよい)
-	if code, res := postJSON(t, srv, "/api/rooms/verify", map[string]string{"roomId": strings.ToLower(roomID[:5]) + "-" + roomID[5:], "password": password}); code != http.StatusOK {
-		t.Fatalf("verify: %d %v", code, res)
-	}
-
-	first, acc1 := register(t, ctx, srv, roomID, password, "c1")
-	second, acc2 := register(t, ctx, srv, roomID, password, "c2")
-	if acc1["type"] != "accept" || acc1["isExistClient"] != false || acc2["type"] != "accept" || acc2["isExistClient"] != true {
-		t.Fatalf("unexpected accept: %v %v", acc1, acc2)
-	}
-	if ice, _ := acc2["iceServers"].([]any); len(ice) != 1 {
-		t.Fatalf("iceServers: %v", acc2)
-	}
-
-	wsjson.Write(ctx, second, map[string]string{"type": "offer", "sdp": "v=0"})
-	var got map[string]string
-	if err := wsjson.Read(ctx, first, &got); err != nil || got["sdp"] != "v=0" {
-		t.Fatalf("relay offer: %+v %v", got, err)
-	}
-
-	// 3 人目は満室で拒否 (確認 API も)
-	if _, rej := register(t, ctx, srv, roomID, password, "c3"); rej["type"] != "reject" || rej["reason"] != "ROOM-FULL" {
-		t.Fatalf("expected ROOM-FULL: %v", rej)
-	}
-	if code, _ := postJSON(t, srv, "/api/rooms/verify", map[string]string{"roomId": roomID, "password": password}); code != http.StatusConflict {
-		t.Fatalf("verify full: %d", code)
-	}
-
-	// 退室すると相手に bye
-	second.Close(websocket.StatusNormalClosure, "")
-	if err := wsjson.Read(ctx, first, &got); err != nil || got["type"] != "bye" {
-		t.Fatalf("expected bye: %+v %v", got, err)
-	}
-}
-
-// 存在しないルーム・誤ったパスワードでは入れないこと
-func TestSignalingRejects(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	srv, store := newTestServer(t)
-	id, _, _, err := store.create("secret-pass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ room, pw, want string }{
-		{"GUESSGUESS", "secret-pass", "INVALID-ROOM-ID"},
-		{id, "wrong", "INVALID-PASSWORD"},
-		{id, "", "INVALID-PASSWORD"},
-	} {
-		if _, rej := register(t, ctx, srv, tc.room, tc.pw, "x"); rej["type"] != "reject" || rej["reason"] != tc.want {
-			t.Errorf("%s/%q: got %v, want %s", tc.room, tc.pw, rej, tc.want)
+// readType は指定した type のメッセージが届くまで読む (ping などは読み飛ばす)．
+func readType(t *testing.T, ctx context.Context, ws *websocket.Conn, typ string) map[string]any {
+	t.Helper()
+	for {
+		var msg map[string]any
+		if err := wsjson.Read(ctx, ws, &msg); err != nil {
+			t.Fatalf("waiting for %s: %v", typ, err)
+		}
+		if msg["type"] == typ {
+			return msg
 		}
 	}
-	if _, acc := register(t, ctx, srv, id, "secret-pass", "ok"); acc["type"] != "accept" {
-		t.Errorf("correct password rejected: %v", acc)
-	}
 }
 
-func registerAs(t *testing.T, ctx context.Context, srv *httptest.Server, roomID, password, hostToken, client string) (*websocket.Conn, map[string]any) {
+func selfOf(joined map[string]any) (id, name, token string) {
+	self := joined["self"].(map[string]any)
+	return self["id"].(string), self["name"].(string), joined["token"].(string)
+}
+
+func register(t *testing.T, ctx context.Context, srv *httptest.Server, pairID, token string) (*websocket.Conn, map[string]any) {
 	t.Helper()
 	ws := dial(t, ctx, srv, "/signaling")
-	msg := map[string]any{"type": "register", "roomId": roomID, "clientId": client, "signalingKey": password}
-	if hostToken != "" {
-		msg["authnMetadata"] = map[string]string{"hostToken": hostToken}
-	}
-	wsjson.Write(ctx, ws, msg)
+	wsjson.Write(ctx, ws, sigRegisterMsg{Type: "register", RoomID: pairID, ClientID: "c", SignalingKey: &token})
 	var res map[string]any
 	if err := wsjson.Read(ctx, ws, &res); err != nil {
-		t.Fatalf("register %s: %v", client, err)
+		t.Fatalf("register: %v", err)
 	}
 	return ws, res
 }
@@ -167,87 +124,222 @@ func roomExists(store *roomStore, id string) bool {
 	return ok
 }
 
+func occupants(store *roomStore, id string) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if r := store.rooms[id]; r != nil {
+		return r.occupants
+	}
+	return -1
+}
+
+// 4 人まで入室でき，在室者一覧・入退室の通知・重ならない表示名が届くこと
+func TestRoomPresence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	srv, store := newTestServer(t)
+	room := createRoom(t, srv)
+
+	host, joined := joinRoom(t, ctx, srv, room.id, room.password, room.hostToken)
+	if joined["type"] != "joined" || joined["self"].(map[string]any)["isHost"] != true || len(joined["peers"].([]any)) != 0 {
+		t.Fatalf("host joined: %v", joined)
+	}
+	hostID, hostName, _ := selfOf(joined)
+
+	names := map[string]bool{hostName: true}
+	conns := []*websocket.Conn{host}
+	for i := 1; i < roomCapacity; i++ {
+		ws, j := joinRoom(t, ctx, srv, strings.ToLower(room.id), room.password, "") // ルームIDは小文字でもよい
+		if j["type"] != "joined" || j["self"].(map[string]any)["isHost"] != false || len(j["peers"].([]any)) != i {
+			t.Fatalf("guest %d joined: %v", i, j)
+		}
+		_, name, _ := selfOf(j)
+		if names[name] {
+			t.Fatalf("duplicate name %q", name)
+		}
+		names[name] = true
+		// 既にいる全員に peer-joined が届く
+		for _, c := range conns {
+			if p := readType(t, ctx, c, "peer-joined")["peer"].(map[string]any); p["name"] != name {
+				t.Fatalf("peer-joined: %v", p)
+			}
+		}
+		conns = append(conns, ws)
+	}
+	for n := range names {
+		found := false
+		for _, a := range animalNames {
+			found = found || a == n
+		}
+		if !found {
+			t.Errorf("name %q is not an animal name", n)
+		}
+	}
+	if occupants(store, room.id) != roomCapacity {
+		t.Fatalf("occupants: %d", occupants(store, room.id))
+	}
+
+	// 5 人目は満室 (参加前の確認 API も)
+	if _, rej := joinRoom(t, ctx, srv, room.id, room.password, ""); rej["type"] != "reject" || rej["reason"] != "ROOM-FULL" {
+		t.Fatalf("expected ROOM-FULL: %v", rej)
+	}
+	if code, _ := postJSON(t, srv, "/api/rooms/verify", map[string]string{"roomId": room.id, "password": room.password}); code != http.StatusConflict {
+		t.Fatalf("verify full: %d", code)
+	}
+
+	// ホストが切断すると他の全員に peer-left
+	host.Close(websocket.StatusNormalClosure, "")
+	for _, c := range conns[1:] {
+		if left := readType(t, ctx, c, "peer-left"); left["id"] != hostID {
+			t.Fatalf("peer-left: %v", left)
+		}
+	}
+	waitFor(t, func() bool { return occupants(store, room.id) == roomCapacity-1 })
+}
+
+// 2 人の組のシグナリングには，その 2 人だけが入れること
+func TestPairSignaling(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	srv, _ := newTestServer(t)
+	room := createRoom(t, srv)
+	_, ja := joinRoom(t, ctx, srv, room.id, room.password, room.hostToken)
+	_, jb := joinRoom(t, ctx, srv, room.id, room.password, "")
+	_, jc := joinRoom(t, ctx, srv, room.id, room.password, "")
+	a, _, tokenA := selfOf(ja)
+	b, _, tokenB := selfOf(jb)
+	_, _, tokenC := selfOf(jc)
+	pair := pairRoomID(room.id, a, b)
+	if pair != pairRoomID(room.id, b, a) {
+		t.Fatal("pairRoomID must not depend on order")
+	}
+
+	// 組に含まれない参加者のトークン・不正な形式は拒否
+	for _, tc := range []struct{ pair, token string }{
+		{pair, tokenC},
+		{pair, "wrong"},
+		{room.id, tokenA},
+		{room.id + "/" + a + "-" + a, tokenA},
+	} {
+		if _, rej := register(t, ctx, srv, tc.pair, tc.token); rej["type"] != "reject" || rej["reason"] != "INVALID-PAIR" {
+			t.Errorf("%s: expected INVALID-PAIR, got %v", tc.pair, rej)
+		}
+	}
+
+	wsA, accA := register(t, ctx, srv, pair, tokenA)
+	if _, dup := register(t, ctx, srv, pair, tokenA); dup["reason"] != "DUPLICATE" {
+		t.Fatalf("expected DUPLICATE: %v", dup)
+	}
+	wsB, accB := register(t, ctx, srv, pair, tokenB)
+	if accA["type"] != "accept" || accA["isExistClient"] != false || accB["type"] != "accept" || accB["isExistClient"] != true {
+		t.Fatalf("accept: %v %v", accA, accB)
+	}
+	if ice, _ := accB["iceServers"].([]any); len(ice) != 1 {
+		t.Fatalf("iceServers: %v", accB)
+	}
+	wsjson.Write(ctx, wsB, map[string]string{"type": "offer", "sdp": "v=0"})
+	if got := readType(t, ctx, wsA, "offer"); got["sdp"] != "v=0" {
+		t.Fatalf("relay offer: %v", got)
+	}
+	wsB.Close(websocket.StatusNormalClosure, "")
+	readType(t, ctx, wsA, "bye")
+}
+
+// 存在しないルーム・誤ったパスワードでは入れないこと
+func TestRoomRejects(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv, store := newTestServer(t)
+	id, _, _, err := store.create("secret-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ room, pw, want string }{
+		{"GUESSGUESS", "secret-pass", "INVALID-ROOM-ID"},
+		{id, "wrong", "INVALID-PASSWORD"},
+		{id, "", "INVALID-PASSWORD"},
+	} {
+		if _, rej := joinRoom(t, ctx, srv, tc.room, tc.pw, ""); rej["type"] != "reject" || rej["reason"] != tc.want {
+			t.Errorf("%s/%q: got %v, want %s", tc.room, tc.pw, rej, tc.want)
+		}
+	}
+	if _, j := joinRoom(t, ctx, srv, id, "secret-pass", "fake-host-token"); j["type"] != "joined" || j["self"].(map[string]any)["isHost"] != false {
+		t.Errorf("correct password: %v", j)
+	}
+}
+
 // ホストが退出しても参加者がいればルームは残り，誰もいなくなったら削除されること
 func TestRoomClosesWhenHostLeftAndEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv, store := newTestServer(t)
-	_, created := postJSON(t, srv, "/api/rooms", map[string]string{})
-	id, pw, token := created["roomId"].(string), created["password"].(string), created["hostToken"].(string)
+	room := createRoom(t, srv)
 
-	host, _ := registerAs(t, ctx, srv, id, pw, token, "host")
-	guest, _ := registerAs(t, ctx, srv, id, pw, "", "guest")
+	host, _ := joinRoom(t, ctx, srv, room.id, room.password, room.hostToken)
+	guest, _ := joinRoom(t, ctx, srv, room.id, room.password, "")
 
 	// ホストが退出ボタンを押さずに切断しただけ (再読み込みなど) ではルームは残る
 	host.Close(websocket.StatusNormalClosure, "")
-	waitFor(t, func() bool { store.mu.Lock(); defer store.mu.Unlock(); return store.rooms[id].occupants == 1 })
-	host, _ = registerAs(t, ctx, srv, id, pw, token, "host") // 入り直し
+	waitFor(t, func() bool { return occupants(store, room.id) == 1 })
+	host, j := joinRoom(t, ctx, srv, room.id, room.password, room.hostToken) // 入り直してもホストのまま
+	if j["self"].(map[string]any)["isHost"] != true {
+		t.Fatalf("rejoin as host: %v", j)
+	}
 
 	// 参加者はホストになれない
-	if code, _ := postJSON(t, srv, "/api/rooms/leave", map[string]string{"roomId": id, "hostToken": "fake"}); code != http.StatusForbidden {
+	if code, _ := postJSON(t, srv, "/api/rooms/leave", map[string]string{"roomId": room.id, "hostToken": "fake"}); code != http.StatusForbidden {
 		t.Fatalf("leave with wrong token: %d", code)
 	}
 
 	// ホストが退出 → 参加者が残っているのでルームは残る
-	if code, res := postJSON(t, srv, "/api/rooms/leave", map[string]string{"roomId": id, "hostToken": token}); code != http.StatusOK || res["deleted"] != false {
+	if code, res := postJSON(t, srv, "/api/rooms/leave", map[string]string{"roomId": room.id, "hostToken": room.hostToken}); code != http.StatusOK || res["deleted"] != false {
 		t.Fatalf("leave: %d %v", code, res)
 	}
 	host.Close(websocket.StatusNormalClosure, "")
-	waitFor(t, func() bool { store.mu.Lock(); defer store.mu.Unlock(); return store.rooms[id].occupants == 1 })
-	if !roomExists(store, id) {
+	waitFor(t, func() bool { return occupants(store, room.id) == 1 })
+	if !roomExists(store, room.id) {
 		t.Fatal("room deleted while guest is still in it")
 	}
 
 	// 参加者も退出 → 0 人になったので削除
 	guest.Close(websocket.StatusNormalClosure, "")
-	waitFor(t, func() bool { return !roomExists(store, id) })
+	waitFor(t, func() bool { return !roomExists(store, room.id) })
 }
 
 // ホストだけがいるルームで退出するとすぐに削除されること
 func TestRoomClosesWhenHostLeavesAlone(t *testing.T) {
 	srv, store := newTestServer(t)
-	_, created := postJSON(t, srv, "/api/rooms", map[string]string{})
-	id, token := created["roomId"].(string), created["hostToken"].(string)
-	if code, res := postJSON(t, srv, "/api/rooms/leave", map[string]string{"roomId": id, "hostToken": token}); code != http.StatusOK || res["deleted"] != true {
+	room := createRoom(t, srv)
+	if code, res := postJSON(t, srv, "/api/rooms/leave", map[string]string{"roomId": room.id, "hostToken": room.hostToken}); code != http.StatusOK || res["deleted"] != true {
 		t.Fatalf("leave: %d %v", code, res)
 	}
-	if roomExists(store, id) {
+	if roomExists(store, room.id) {
 		t.Fatal("room still exists")
 	}
 }
 
-// ホストがルームを削除すると在室中の参加者は ROOM-DELETED で退室させられること
+// ホストがルームを削除すると在室中の参加者に closed (ROOM-DELETED) が届くこと
 func TestHostDeletesRoom(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv, store := newTestServer(t)
-	_, created := postJSON(t, srv, "/api/rooms", map[string]string{})
-	id, pw, token := created["roomId"].(string), created["password"].(string), created["hostToken"].(string)
-	registerAs(t, ctx, srv, id, pw, token, "host")
-	guest, _ := registerAs(t, ctx, srv, id, pw, "", "guest")
+	room := createRoom(t, srv)
+	joinRoom(t, ctx, srv, room.id, room.password, room.hostToken)
+	guest, _ := joinRoom(t, ctx, srv, room.id, room.password, "")
 
-	if code, _ := postJSON(t, srv, "/api/rooms/delete", map[string]string{"roomId": id, "hostToken": "fake"}); code != http.StatusForbidden {
+	if code, _ := postJSON(t, srv, "/api/rooms/delete", map[string]string{"roomId": room.id, "hostToken": "fake"}); code != http.StatusForbidden {
 		t.Fatalf("delete with wrong token: %d", code)
 	}
-	if code, _ := postJSON(t, srv, "/api/rooms/delete", map[string]string{"roomId": id, "hostToken": token}); code != http.StatusOK {
+	if code, _ := postJSON(t, srv, "/api/rooms/delete", map[string]string{"roomId": room.id, "hostToken": room.hostToken}); code != http.StatusOK {
 		t.Fatalf("delete: %d", code)
 	}
-	for { // bye (ホストの退室) が先に届くことがある
-		var msg map[string]any
-		if err := wsjson.Read(ctx, guest, &msg); err != nil {
-			t.Fatalf("expected reject: %v", err)
-		}
-		if msg["type"] == "reject" {
-			if msg["reason"] != "ROOM-DELETED" {
-				t.Fatalf("reason: %v", msg)
-			}
-			break
-		}
+	if msg := readType(t, ctx, guest, "closed"); msg["reason"] != "ROOM-DELETED" {
+		t.Fatalf("closed: %v", msg)
 	}
-	if roomExists(store, id) {
+	if roomExists(store, room.id) {
 		t.Fatal("room still exists")
 	}
-	if _, rej := registerAs(t, ctx, srv, id, pw, "", "late"); rej["reason"] != "INVALID-ROOM-ID" {
+	if _, rej := joinRoom(t, ctx, srv, room.id, room.password, ""); rej["reason"] != "INVALID-ROOM-ID" {
 		t.Fatalf("join deleted room: %v", rej)
 	}
 }

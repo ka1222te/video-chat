@@ -110,13 +110,39 @@
             border: 1px solid var(--border);
         }
 
-        #remoteCanvas {
+        /* 相手の映像 (人数に応じて並べる) */
+        .grid {
             position: absolute;
             inset: 0;
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
+            display: grid;
+            grid-template-columns: 1fr;
+            grid-auto-rows: 1fr;
+            gap: 8px;
+            padding: 8px;
         }
+
+        .grid[data-count="2"], .grid[data-count="3"] { grid-template-columns: 1fr 1fr; }
+        .grid[data-count="3"] .tile:first-child { grid-column: span 2; }
+
+        @media (max-aspect-ratio: 1/1) { /* 縦長の画面では縦に並べる */
+            .grid[data-count="2"] { grid-template-columns: 1fr; }
+        }
+
+        .tile {
+            position: relative;
+            min-width: 0;
+            min-height: 0;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        .tile video { width: 100%; height: 100%; object-fit: contain; }
+        .tile .placeholder { gap: 10px; }
+        .tile .avatar { width: 72px; height: 72px; font-size: 28px; font-weight: 600; color: var(--text); }
+        .grid[data-count="1"] .tile .avatar { width: 112px; height: 112px; font-size: 44px; }
+        .tile .host-badge { margin-left: 2px; }
+        .tile.failed .placeholder span { color: var(--danger); }
 
         .placeholder {
             position: absolute;
@@ -839,16 +865,12 @@
 
         <main class="content">
             <section class="stage" aria-label="相手の映像">
-                <canvas id="remoteCanvas"></canvas>
-                <div class="placeholder" id="remotePlaceholder">
+                <div class="grid" id="grid" data-count="0"></div>
+                <div class="placeholder" id="emptyState">
                     <div class="avatar">
-                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14.2a5 5 0 0 1 5.5 5.8"/></svg>
                     </div>
-                    <span id="remotePlaceholderText">相手の映像はまだありません</span>
-                </div>
-                <div class="tag" id="remoteTag" hidden>
-                    <svg class="muted-icon" id="remoteMicOff" hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-label="ミュート中"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
-                    相手
+                    <span>参加者を待っています…</span>
                 </div>
 
                 <div class="self" aria-label="自分の映像">
@@ -860,7 +882,7 @@
                     </div>
                     <div class="tag">
                         <svg class="muted-icon" id="localMicOff" hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-label="ミュート中"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
-                        自分
+                        <span id="selfName">自分</span>
                     </div>
                 </div>
 
@@ -946,64 +968,208 @@
           ui.loadFailed();
       });
 
-    // ---- DataChannel で送るメディアメッセージ (バイナリ) ----
-    // [0] 種別 (1: WebP 画像, 2: JPEG 画像, 3: 16bit PCM 音声, 4: カメラ・マイクの状態)  [1-3] 予約
-    // [4-7] タイムスタンプ(ms, 送信開始から)  [8-11] シーケンス番号  [12-15] 音声のサンプリングレート(Hz)
-    // [16-] データ本体 (いずれも uint32 リトルエンディアン)
-    const HEADER_BYTES = 16;
-    const KIND_WEBP = 1, KIND_JPEG = 2, KIND_PCM16 = 3, KIND_STATE = 4;
-    const FRAME_MIME = { [KIND_WEBP]: "image/webp", [KIND_JPEG]: "image/jpeg" };
-    const MAX_MESSAGE_BYTES = 200 * 1024; // 1 メッセージの上限(ブラウザ間で安全に送れる大きさ)
-    // 送信バッファ(bufferedAmount)がこれを超えている間は送らない(回線が追いつかないとき遅延が伸び続けるのを防ぐ)．
-    // 映像は数フレーム分で間引き始め，音声は映像より優先して送る．
-    const MAX_BUFFERED_FRAME = 256 * 1024;
-    const MAX_BUFFERED_AUDIO = 1024 * 1024;
-    const FRAME_INTERVAL = 50; // 映像の送信間隔(ms)．回線・端末が追いつかないときは自動で間引かれる
+    // ---- 参加者 (フルメッシュ) ----
+    // 映像・音声はブラウザ標準の WebRTC トラックで送受信する (圧縮・回線に合わせた調整はブラウザが行う)．
+    // 相手ごとの DataChannel はカメラ・マイクの状態の通知に使う．
     const MAX_TEXT_CHARS = 500; // 相手から届く文字列メッセージをログに出す最大文字数
+    let self = null; // 自分 { id, name, isHost }
+    const peers = new Map(); // 参加者ID -> { id, name, isHost, pc, dc, stream, camOn, micOn, status }
 
-    let dataChannel = null; // RTCDataChannel (Go 側で P2P 接続を確立した後に渡される)
-    let sendStartTime = null; // 送信開始タイムスタンプ
-    let sendSequence = 0; // 送信シーケンス
+    // 在室人数ごとの映像の送信設定．全員に同じ映像を送るため，人数が増えるほど 1 本あたりを抑える
+    const QUALITY = {
+        2: { maxBitrate: 1500000, maxFramerate: 30, maxWidth: 1280 },
+        3: { maxBitrate: 800000, maxFramerate: 24, maxWidth: 960 },
+        4: { maxBitrate: 500000, maxFramerate: 20, maxWidth: 640 },
+    };
 
-    window.onP2PReady = function (ch) { // P2P 接続完了処理 (Go から呼ばれる)
-        dataChannel = ch;
-        ch.binaryType = "arraybuffer";
-        ch.onmessage = onRemoteMessage; // 受信は JS で直接処理する (Go を経由しない)
-        ch.addEventListener("close", () => {
-            dataChannel = null;
-            ui.setState("ended");
-        });
-        const start = () => {
-            sendStartTime = performance.now(); // 送信開始時刻を記録
-            sendSequence = 0; // シーケンス番号をリセット
-            appendLog("[Sys]: P2P DataChannel is ready. Start camera."); // ログ追加
-            ui.setState("connected");
-            sendLocalState(); // カメラ・マイクの状態を相手に伝える
-        };
-        if (ch.readyState === "open") {
-            start();
-        } else {
-            ch.addEventListener("open", start, { once: true });
+    function validPeer(p) { // サーバから届いた参加者情報の確認
+        return p && typeof p.id === "string" && p.id.length <= 16 && typeof p.name === "string" && p.name.length <= 32;
+    }
+
+    window.onRoomEvent = function (json) { // /room から届いたメッセージ (Go から呼ばれる)
+        let msg;
+        try {
+            msg = JSON.parse(json);
+        } catch (e) {
+            return;
+        }
+        if (msg.type === "joined" && validPeer(msg.self)) {
+            self = { id: msg.self.id, name: msg.self.name, isHost: msg.self.isHost === true };
+            appendLog("[Sys]: Joined the room as " + self.name + ".");
+            ui.joined(self);
+            (Array.isArray(msg.peers) ? msg.peers : []).filter(validPeer).forEach(addPeer);
+        } else if (msg.type === "peer-joined" && validPeer(msg.peer)) {
+            appendLog("[Sys]: " + msg.peer.name + " joined.");
+            addPeer(msg.peer);
+        } else if (msg.type === "peer-left") {
+            const p = peers.get(msg.id);
+            if (p) {
+                appendLog("[Sys]: " + p.name + " left.");
+                removePeer(p.id);
+            }
         }
     };
+
+    function addPeer(info) {
+        if (peers.has(info.id) || (self && info.id === self.id)) {
+            return;
+        }
+        const p = { id: info.id, name: info.name, isHost: info.isHost === true, pc: null, dc: null, stream: null, camOn: false, micOn: false, status: "connecting" };
+        peers.set(p.id, p);
+        ui.addTile(p);
+        updateAllQuality();
+    }
+
+    function removePeer(id) {
+        const p = peers.get(id);
+        if (!p) {
+            return;
+        }
+        peers.delete(id);
+        try {
+            if (p.pc) {
+                p.pc.close();
+            }
+        } catch (e) { /* 閉じ済み */ }
+        ui.removeTile(p);
+        updateAllQuality();
+    }
+
+    window.onPeerReady = function (id, pc, dc) { // 相手との P2P 接続が確立した (Go から呼ばれる)
+        const p = peers.get(id);
+        if (!p) { // 待っている間に退室した
+            try { pc.close(); } catch (e) { /* 閉じ済み */ }
+            return;
+        }
+        p.pc = pc;
+        p.dc = dc;
+        // 受信: 相手の映像・音声のトラックを 1 つのストリームにまとめてタイルで再生する
+        p.stream = new MediaStream(pc.getReceivers().map((r) => r.track).filter((t) => t));
+        pc.addEventListener("track", (e) => {
+            if (!p.stream.getTracks().includes(e.track)) {
+                p.stream.addTrack(e.track);
+            }
+        });
+        pc.addEventListener("connectionstatechange", () => {
+            if (pc.connectionState === "failed") {
+                setPeerStatus(p, "failed");
+            } else if (pc.connectionState === "connected") {
+                setPeerStatus(p, "connected");
+            }
+        });
+        dc.binaryType = "arraybuffer";
+        dc.onmessage = (e) => onPeerMessage(p, e);
+        dc.addEventListener("open", () => sendState(p));
+        // 送信: 自分のカメラ・マイクのトラックを設定 (トランシーバは接続時に作られている)
+        applyLocalTracks(p);
+        applyQuality(p);
+        sendState(p);
+        setPeerStatus(p, "connected");
+        ui.peerStream(p);
+    };
+
+    window.onPeerFailed = function (id, reason) { // 相手と接続できなかった (Go から呼ばれる)
+        const p = peers.get(id);
+        if (p) {
+            setPeerStatus(p, "failed");
+        }
+    };
+
+    function setPeerStatus(p, status) {
+        p.status = status;
+        ui.peerChanged(p);
+    }
+
+    // kind ("audio" / "video") のトランシーバの送信側 (受信側のトラックの種類で見分ける)
+    function senderOf(pc, kind) {
+        const t = pc.getTransceivers().find((t) => !t.stopped && t.receiver && t.receiver.track && t.receiver.track.kind === kind);
+        return t ? t.sender : null;
+    }
+
+    function applyLocalTracks(p) { // 自分のトラックを送る (オフなら null にして何も送らない)
+        if (!p.pc) {
+            return;
+        }
+        for (const [kind, track] of [["video", videoTrack], ["audio", audioTrack]]) {
+            const sender = senderOf(p.pc, kind);
+            if (sender && sender.track !== track) {
+                sender.replaceTrack(track).catch((e) => console.error("replaceTrack", e));
+            }
+        }
+    }
+
+    async function applyQuality(p) { // 在室人数に応じて映像のビットレート・フレームレート・解像度の上限を設定
+        const sender = p.pc && senderOf(p.pc, "video");
+        if (!sender) {
+            return;
+        }
+        const q = QUALITY[Math.min(4, Math.max(2, peers.size + 1))];
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+            return;
+        }
+        const width = (videoTrack && videoTrack.getSettings().width) || q.maxWidth;
+        Object.assign(params.encodings[0], {
+            maxBitrate: q.maxBitrate,
+            maxFramerate: q.maxFramerate,
+            scaleResolutionDownBy: Math.max(1, width / q.maxWidth),
+        });
+        try {
+            await sender.setParameters(params);
+        } catch (e) {
+            console.warn("setParameters", e);
+        }
+    }
+
+    function updateAllQuality() {
+        for (const p of peers.values()) {
+            applyQuality(p);
+        }
+    }
+
+    function sendState(p) { // カメラ・マイクの状態を相手に伝える
+        if (p.dc && p.dc.readyState === "open") {
+            try {
+                p.dc.send(JSON.stringify({ type: "state", cam: camOn, mic: micOn }));
+            } catch (e) { /* 切断直後など */ }
+        }
+    }
+
+    function onPeerMessage(p, event) { // 相手から届いたメッセージ (DataChannel)
+        const data = event.data;
+        if (typeof data !== "string" || data.length > 4096) {
+            return;
+        }
+        let msg = null;
+        try {
+            msg = JSON.parse(data);
+        } catch (e) { /* JSON 以外は文字列メッセージとして扱う */ }
+        if (msg && msg.type === "state") {
+            p.camOn = msg.cam === true;
+            p.micOn = msg.mic === true;
+            ui.peerChanged(p);
+        } else if (!msg) { // 文字列はログに出す(長さ制限あり)
+            const text = data.length > MAX_TEXT_CHARS ? data.slice(0, MAX_TEXT_CHARS) + "…" : data;
+            appendLog("[" + p.name + "]: " + text);
+        }
+    }
 
     let currentRoom = null; // 入室中のルーム { id, password, hostToken } (hostToken はルームを作成した人のみ)
 
     function enterRoom(id, password, hostToken = "") { // ルームに入る (入室前の確認画面から呼ばれる)
         currentRoom = { id, password, hostToken };
         rememberRoom(currentRoom); // 再読み込みしても同じルームに入り直せるように
-        remoteAudioCtx.resume(); // ブラウザの自動再生制限で停止している音声出力を，クリック操作を契機に再開
         ui.showCall(id, hostToken !== "");
         joinCurrentRoom();
     }
 
-    function joinCurrentRoom() { // シグナリングに入る (失敗後の再試行でも使う)
+    function joinCurrentRoom() { // ルームに入る (失敗後の再試行でも使う)
         appendLog("[Sys]: Joining room " + currentRoom.id + "...");
         ui.setState("joining");
         window.NewVideoChat(currentRoom.id, currentRoom.password, currentRoom.hostToken); // ルームに入室(Go)
     }
 
-    window.onCallStatus = function (state, reason) { // Go から呼ばれる (waiting / connecting / failed / ended)
+    window.onCallStatus = function (state, reason) { // Go から呼ばれる (failed / ended)
         ui.setState(state, reason);
     };
 
@@ -1033,7 +1199,7 @@
             "INVALID-ROOM-ID": "ルームが見つかりません．ルーム ID が違うか，ルームが削除されています（ホストの退出・削除，サーバの再起動など）．",
             "INVALID-PASSWORD": "パスワードが違います．",
             "LOCKED": "パスワードを何度も間違えたため，このルームにはしばらく入れません（最大 10 分）．",
-            "ROOM-FULL": "このルームにはすでに 2 人が入っています．",
+            "ROOM-FULL": "このルームは満室です（最大 4 人）．",
             "INVALID-PASSWORD-FORMAT": "パスワードは 4〜64 文字で指定してください．",
             "TOO-MANY-ROOMS": "ルームが多すぎるため作成できません．しばらくしてからお試しください．",
             "PEER-LEFT": "相手が接続の途中で退出しました．",
@@ -1085,7 +1251,7 @@
         return { id, password: params.get("pw") || "", hostToken: "" };
     }
 
-    const MAX_LOG_CHARS = 20000; // ログの最大文字数(相手からの大量のメッセージでメモリを圧迫しないよう古い方から捨てる)
+    const MAX_LOG_CHARS = 20000; // ログの最大文字数(古い方から捨てる)
     function appendLog(msg) { // ログ出力 (textarea の value に追記するため HTML としては解釈されない)
         const logs = document.getElementById("logs"); // ログ要素取得
         let text = logs.value + msg + "\n"; // メッセージ追加
@@ -1097,40 +1263,12 @@
         ui.logAdded();
     }
 
-    function mediaTimestamp(t = performance.now()) { // 送信開始からの経過時間(ms)
-        return Math.max(0, Math.floor(t - sendStartTime)) >>> 0;
-    }
-
-    function sendMedia(kind, payload, maxBuffered, timestamp, sampleRate = 0) { // メディアメッセージ送信 (送れなかったら false)
-        const ch = dataChannel;
-        if (!ch || sendStartTime === null || ch.readyState !== "open" || ch.bufferedAmount > maxBuffered) { // 未接続・送信が詰まっているとき
-            return false;
-        }
-        if (HEADER_BYTES + payload.byteLength > MAX_MESSAGE_BYTES) {
-            return false;
-        }
-        const buf = new Uint8Array(HEADER_BYTES + payload.byteLength);
-        const view = new DataView(buf.buffer);
-        view.setUint8(0, kind);
-        view.setUint32(4, timestamp, true);
-        view.setUint32(8, (sendSequence++) >>> 0, true);
-        view.setUint32(12, sampleRate >>> 0, true);
-        buf.set(payload, HEADER_BYTES);
-        try {
-            ch.send(buf);
-            return true;
-        } catch (e) { // 切断直後など
-            console.error("send error", e);
-            return false;
-        }
-    }
-
     // ---- カメラ・マイク ----
     // 既定はどちらもオフ．オンにしたときだけデバイスを開き，オフにするとトラックを止めて解放する (カメラのランプも消える)．
     let videoTrack = null, audioTrack = null; // 使用中のトラック
     let camOn = false, micOn = false; // 相手に伝える状態 (トラックが動いているか)
     const selectedDevice = { videoinput: "", audioinput: "" }; // 使用するデバイス ID (空ならブラウザの既定)
-    let localAudioCtx = null, audioProcessor = null, micAnalyser = null, micSource = null;
+    let localAudioCtx = null, micAnalyser = null, micSource = null; // 音量メーター用
     let mediaQueue = Promise.resolve(); // 切り替えを順番に処理する (連打対策)
 
     function serialMedia(fn) {
@@ -1140,8 +1278,11 @@
 
     async function openTrack(kind) { // kind: "video" | "audio"
         const id = selectedDevice[kind === "video" ? "videoinput" : "audioinput"];
-        const base = kind === "video" ? {} : { echoCancellation: true, noiseSuppression: true };
-        const constraints = { [kind]: id ? { ...base, deviceId: { exact: id } } : (kind === "video" ? true : base) };
+        // 映像は最大 1280x720・30fps で撮り，送るときに人数に応じて縮小する (applyQuality)
+        const base = kind === "video"
+            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+            : { echoCancellation: true, noiseSuppression: true };
+        const constraints = { [kind]: id ? { ...base, deviceId: { exact: id } } : base };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         const track = stream.getTracks()[0];
         track.addEventListener("ended", () => { // デバイスが外されたときなど
@@ -1193,9 +1334,8 @@
                 try {
                     audioTrack = await openTrack("audio");
                     selectedDevice.audioinput = audioTrack.getSettings().deviceId || selectedDevice.audioinput;
-                    ensureAudioPipeline();
+                    ensureMeter();
                     micSource = localAudioCtx.createMediaStreamSource(new MediaStream([audioTrack]));
-                    micSource.connect(audioProcessor);
                     micSource.connect(micAnalyser);
                 } catch (e) {
                     if (audioTrack) {
@@ -1241,9 +1381,13 @@
         camOn = micOn = false;
     }
 
-    function mediaChanged() {
+    function mediaChanged() { // 自分のカメラ・マイクが変わったとき (全員への送信トラックと状態の通知を更新)
         ui.localState(camOn, micOn);
-        sendLocalState();
+        for (const p of peers.values()) {
+            applyLocalTracks(p);
+            applyQuality(p);
+            sendState(p);
+        }
     }
 
     function micLevel() { // マイクの入力レベル (0〜1，音量メーター用)
@@ -1259,211 +1403,16 @@
         return Math.min(1, Math.sqrt(sum / buf.length) * 4);
     }
 
-    function ensureAudioPipeline() { // マイクの音声を送るための処理 (最初にマイクをオンにしたときに作る)
+    function ensureMeter() { // 音量メーター用 (最初にマイクをオンにしたときに作る)
         if (localAudioCtx) {
             localAudioCtx.resume();
             return;
         }
         localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        audioProcessor = localAudioCtx.createScriptProcessor(2048, 1, 1); // 1 チャンク約 43ms (大きいほど録音から送信までの遅延が増える)
         micAnalyser = localAudioCtx.createAnalyser();
         micAnalyser.fftSize = 1024;
-        audioProcessor.onaudioprocess = function (event) { // 音声データが処理される度に発火する処理
-            if (!dataChannel || !micOn) { // 未接続・ミュート中は送らない
-                return;
-            }
-            const input = event.inputBuffer.getChannelData(0); // ローカルの音声データ(Float32Array [-1,1])
-            const timestamp = mediaTimestamp(performance.now() - event.inputBuffer.duration * 1000); // チャンク先頭の録音時点
-            const pcm16 = new Int16Array(input.length); // Float32 -> Int16 PCM に変換
-            for (let i = 0; i < input.length; i++) { // [-1, 1] -> [-32767, 32767]
-                pcm16[i] = Math.round(Math.max(-1, Math.min(1, input[i])) * 32767);
-            }
-            sendMedia(KIND_PCM16, new Uint8Array(pcm16.buffer), MAX_BUFFERED_AUDIO, timestamp, localAudioCtx.sampleRate); // 現在の音声データ送信
-        };
-        audioProcessor.connect(localAudioCtx.destination); // ScriptProcessor を動かすために出力へ接続(出力は無音)
     }
 
-    (function startFrameSender() { // 映像フレーム送信 (カメラがオンで接続中のときだけ送る)
-        const video = document.getElementById("localVideo"); // ローカルビデオ要素取得
-        const canvas = document.createElement("canvas"); // キャンバス要素取得
-        const ctx = canvas.getContext("2d"); // コンテキスト取得
-        const MAX_FRAME_WIDTH = 640; // 送信フレームの最大幅(DataChannelのメッセージサイズ上限対策)
-        const probe = document.createElement("canvas"); // WebPエンコード対応確認用
-        probe.width = probe.height = 1;
-        const useWebP = probe.toDataURL("image/webp").startsWith("data:image/webp"); // 非対応(Safari等)はPNGになり巨大化するためJPEG
-        const frameKind = useWebP ? KIND_WEBP : KIND_JPEG;
-        let encoding = false; // エンコード中(前のフレームが終わるまで次を作らない)
-
-        setInterval(() => {
-            const ch = dataChannel;
-            if (!camOn || encoding || !ch || ch.readyState !== "open" || ch.bufferedAmount > MAX_BUFFERED_FRAME) { // 送れないときはエンコードも省く
-                return;
-            }
-            const vw = video.videoWidth; // ビデオサイズ
-            const vh = video.videoHeight; // ビデオサイズ
-            if (vw === 0 || vh === 0) { // カメラ映像がまだ来ていないとき
-                return;
-            }
-            const scale = Math.min(1, MAX_FRAME_WIDTH / vw); // 最大幅に収まるよう縮小
-            const w = Math.round(vw * scale);
-            const h = Math.round(vh * scale);
-            if (canvas.width !== w || canvas.height !== h) {
-                canvas.width = w; // ビデオサイズ更新
-                canvas.height = h; // ビデオサイズ更新
-            }
-            ctx.drawImage(video, 0, 0, w, h); // 現在のフレーム描画
-            const timestamp = mediaTimestamp(); // 撮影時点のタイムスタンプ(エンコード後ではなく)
-            encoding = true;
-            // toBlob は非同期にエンコードするため，toDataURL と違いメインスレッドを止めない
-            canvas.toBlob(async (blob) => {
-                try {
-                    if (blob) {
-                        sendMedia(frameKind, new Uint8Array(await blob.arrayBuffer()), MAX_BUFFERED_FRAME, timestamp);
-                    }
-                } finally {
-                    encoding = false;
-                }
-            }, FRAME_MIME[frameKind], 0.7);
-        }, FRAME_INTERVAL);
-    })();
-
-    function sendLocalState() { // カメラ・マイクの状態を相手に伝える (bit0: カメラ, bit1: マイク)
-        if (sendStartTime !== null) {
-            sendMedia(KIND_STATE, new Uint8Array([(camOn ? 1 : 0) | (micOn ? 2 : 0)]), MAX_BUFFERED_AUDIO, mediaTimestamp());
-        }
-    }
-
-    function onRemoteMessage(event) { // 相手から届いたメッセージ
-        const data = event.data;
-        if (typeof data === "string") { // 文字列はログに出す(長さ制限あり)
-            const text = data.length > MAX_TEXT_CHARS ? data.slice(0, MAX_TEXT_CHARS) + "…" : data;
-            appendLog("[Any]: " + text);
-            return;
-        }
-        if (!(data instanceof ArrayBuffer) || data.byteLength < HEADER_BYTES) {
-            return;
-        }
-        const view = new DataView(data);
-        const kind = view.getUint8(0);
-        const timestamp = view.getUint32(4, true);
-        const sequence = view.getUint32(8, true);
-        if (kind === KIND_WEBP || kind === KIND_JPEG) { // 画像の種類はこちらで決める(相手が任意の URL や形式を指定できない)
-            renderRemoteFrame(new Blob([new Uint8Array(data, HEADER_BYTES)], { type: FRAME_MIME[kind] }), timestamp, sequence);
-        } else if (kind === KIND_PCM16 && (data.byteLength - HEADER_BYTES) % 2 === 0) {
-            playRemoteAudioChunk(new Int16Array(data, HEADER_BYTES), view.getUint32(12, true), timestamp, sequence);
-        } else if (kind === KIND_STATE && data.byteLength > HEADER_BYTES) {
-            const flags = view.getUint8(HEADER_BYTES);
-            ui.remoteState((flags & 1) !== 0, (flags & 2) !== 0);
-        }
-    }
-
-    // ---- 受信側の再生時計 (映像/音声で共有) ----
-    // 送信時刻 timestamp のメディアを performance.now() 基準のいつ再生するかを決める．
-    //   再生時刻 = timestamp + offset + JITTER_BUFFER
-    // offset は「受信時刻 - 送信時刻」の最小値(最も速く届いたときの伝送遅延と時計の差)．
-    // 映像と音声を同じ式で再生するため両者のタイミングがそろい，遅延は JITTER_BUFFER 程度に収まる．
-    const JITTER_BUFFER = 200; // 届く間隔の揺らぎを吸収するための待ち(ms)
-    const MAX_WAIT = 1000; // 相手から届くタイムスタンプは信用できないため，待ち時間はこの範囲に制限する(ms)
-    let playoutOffset = null;
-    function playoutTime(timestamp) { // 再生すべき時刻 (performance.now() 基準)
-        const now = performance.now();
-        const transit = now - timestamp;
-        if (playoutOffset === null || transit < playoutOffset) { // より速く届いた → 基準を早める
-            playoutOffset = transit;
-        } else if (transit - playoutOffset > JITTER_BUFFER) { // 揺らぎ吸収分を超えて遅れて届く(経路が遅くなった) → 少しずつ基準を遅らせる
-            playoutOffset += (transit - playoutOffset - JITTER_BUFFER) * 0.05;
-        }
-        const wait = timestamp + playoutOffset + JITTER_BUFFER - now;
-        return now + (Number.isFinite(wait) ? Math.min(Math.max(wait, 0), MAX_WAIT) : 0);
-    }
-
-    const renderRemoteFrame = (function () { // 受信したフレーム描画
-        const MAX_DECODING = 3; // 同時にデコードするフレーム数の上限(追いつかないときは捨てる)
-        const canvas = document.getElementById("remoteCanvas"); // キャンバス要素取得
-        const ctx = canvas.getContext("2d"); // コンテキスト取得
-        let lastDrawnSequence = -1; // 描画済みの最新シーケンス番号(古いフレームで上書きしない)
-        let decoding = 0; // デコード中のフレーム数
-
-        return function (blob, timestamp, sequence) {
-            if (decoding >= MAX_DECODING) {
-                return;
-            }
-            const at = playoutTime(timestamp); // 表示すべき時刻
-            decoding++;
-            // createImageBitmap はメインスレッドを止めずに画像をデコードする
-            createImageBitmap(blob).then((bmp) => {
-                const draw = () => {
-                    if (sequence < lastDrawnSequence) { // 後から来た古いフレームは捨てる
-                        bmp.close();
-                        return;
-                    }
-                    lastDrawnSequence = sequence;
-                    if (canvas.width !== bmp.width || canvas.height !== bmp.height) { // サイズが変わったときだけ更新(毎回の再確保を避ける)
-                        canvas.width = bmp.width; // キャンバスサイズ指定
-                        canvas.height = bmp.height; // キャンバスサイズ指定
-                    }
-                    ctx.drawImage(bmp, 0, 0); // 画像描画
-                    bmp.close();
-                    ui.remoteFrame();
-                };
-                const wait = at - performance.now();
-                if (wait <= 0) { // 表示時刻を過ぎていれば即座に表示
-                    draw();
-                } else {
-                    setTimeout(draw, wait);
-                }
-            }).catch(() => {
-                console.error("renderRemoteFrame: failed to decode frame", sequence);
-            }).finally(() => {
-                decoding--;
-            });
-        };
-    })();
-
-    const remoteAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); // 受信音声の再生用
-
-    const playRemoteAudioChunk = (function () { // 受信した音声再生
-        const audioCtx = remoteAudioCtx;
-        const MAX_CHUNK_SAMPLES = 32768; // 1 チャンクの最大サンプル数
-        const JOIN_GAP = 0.03; // 前のチャンクの終わりとの差がこれ以内ならつなげて再生する(秒，プツプツ音の防止)
-        const MAX_LAG = 0.25; // 予定より遅れて再生しているチャンクがこれを超えたら捨てて追いつく(秒)
-        let lastEnd = 0; // 直前に予約したチャンクの再生終了時刻(audioCtx.currentTime 基準)
-
-        return function (pcm16, sampleRate, timestamp, sequence) { // 音声再生(届いた時点で再生時刻を予約する)
-            if (pcm16.length === 0 || pcm16.length > MAX_CHUNK_SAMPLES || sampleRate < 8000 || sampleRate > 96000) { // 不正なデータは捨てる
-                return;
-            }
-            const at = playoutTime(timestamp); // 再生すべき時刻 (performance.now() 基準)
-            if (audioCtx.state !== "running") { // 自動再生制限などで止まっているとき
-                return;
-            }
-            // performance.now() 基準 → audioCtx.currentTime 基準に変換(スピーカーから出るまでの遅延分だけ早める)
-            const now = audioCtx.currentTime;
-            const target = now + (at - performance.now()) / 1000 - (audioCtx.outputLatency || audioCtx.baseLatency || 0);
-            let start = Math.max(target, now);
-            if (Math.abs(start - lastEnd) < JOIN_GAP || start < lastEnd) { // 前のチャンクに続けて再生
-                start = Math.max(lastEnd, now);
-            }
-            if (start - target > MAX_LAG) { // 再生が予定より大きく遅れている → このチャンクを捨てて遅延を解消
-                return;
-            }
-            try {
-                // 送信側のサンプリングレートで作る(受信側と異なってもブラウザが変換して再生するため音程がずれない)
-                const audioBuffer = audioCtx.createBuffer(1, pcm16.length, sampleRate);
-                const channel = audioBuffer.getChannelData(0); // チャンネルデータ取得
-                for (let i = 0; i < pcm16.length; i++) { // Int16 -> Float32 に変換
-                    channel[i] = pcm16[i] / 32767.0;
-                }
-                const source = audioCtx.createBufferSource(); // ソース作成
-                source.buffer = audioBuffer; // バッファ指定
-                source.connect(audioCtx.destination); // 再生先に接続
-                source.start(start); // 予約した時刻に再生
-                lastEnd = start + audioBuffer.duration;
-            } catch (e) { // エラー発生時
-                console.error("playRemoteAudioChunk error", e); // デバッグ用
-            }
-        };
-    })();
     // ---- 画面の表示・操作 ----
     const ui = (function () {
         const $ = (id) => document.getElementById(id);
@@ -1472,12 +1421,12 @@
         const overlayButton = $("overlayButton"), overlayButton2 = $("overlayButton2"), overlaySpinner = $("overlaySpinner");
         const status = $("status"), statusText = $("statusText"), timer = $("timer");
         const micBtn = $("micBtn"), camBtn = $("camBtn"), logBtn = $("logBtn"), logBadge = $("logBadge");
-        const remotePlaceholder = $("remotePlaceholder"), remotePlaceholderText = $("remotePlaceholderText");
+        const grid = $("grid"), emptyState = $("emptyState");
+        const tiles = new Map(); // 参加者ID -> タイルの要素
         const createDialog = $("createDialog"), joinDialog = $("joinDialog"), shareDialog = $("shareDialog"), leaveDialog = $("leaveDialog");
         let state = "loading";
         let unread = 0;
         let connectedAt = 0, timerId = null;
-        let remoteCamOn = true, remoteHasFrame = false;
         let wasmReady = false;
 
         // 失敗してもホームに戻らずに再試行できる理由 (パスワード違いなどは再試行しても同じなのでホームへ)
@@ -1495,10 +1444,10 @@
         const views = {
             joining: ["入室中", "ルームに入っています…", "", true],
             waiting: ["参加者を待っています", "", "", false], // 中央の案内は出さない (相手の映像の位置に表示)
-            connecting: ["接続中", "相手が参加しました", "P2P 接続を確立しています…", true],
-            connected: ["通話中", "", "", false],
+            connected: ["通話中", "", "", false], // 誰かが在室している
+
             failed: ["接続失敗", "接続できませんでした", "", false],
-            ended: ["通話終了", "通話が終了しました", "相手が退出したか，接続が切れました．", false],
+            ended: ["通話終了", "通話が終了しました", "サーバとの接続が切れました．", false],
         };
 
         function setButtons(primary, secondary) { // 案内のボタン ([ラベル, 処理] または null)
@@ -1515,13 +1464,11 @@
             if (!views[next] || (state === "ended" && (next !== "ended" || !reason))) { // 終了後に届く古い通知は無視 (理由の更新のみ受け付ける)
                 return;
             }
-            if (state === "connected" && next === "connecting") { // ICE 再接続などの通知
-                return;
-            }
+            const prev = state;
             state = next;
             const [label, title, text, busy] = views[next];
             status.dataset.state = next;
-            statusText.textContent = label;
+            statusText.textContent = next === "connected" ? label + "（" + (peers.size + 1) + " 人）" : label;
             overlay.hidden = next === "connected" || next === "waiting";
             overlayTitle.textContent = title;
             overlayText.textContent = next === "failed" || (next === "ended" && reason) ? reasonText(reason) : text;
@@ -1533,17 +1480,78 @@
             } else {
                 setButtons(null, null);
             }
-            if (next === "connected") {
+            if (next === "connected" && prev !== "connected") { // 誰かと一緒になってからの経過時間
                 connectedAt = Date.now();
                 timer.hidden = false;
                 tick();
                 timerId = setInterval(tick, 1000);
-            } else if (timerId !== null) {
+            } else if (next !== "connected" && timerId !== null) {
                 clearInterval(timerId);
                 timerId = null;
+                timer.hidden = true;
             }
-            $("remoteTag").hidden = next !== "connected";
-            updateRemotePlaceholder();
+        }
+
+        function updateRoomState() { // 在室人数に応じて「参加者を待っています」と「通話中」を切り替える
+            grid.dataset.count = String(peers.size);
+            emptyState.hidden = peers.size > 0;
+            if (state === "waiting" || state === "connected") {
+                setState(peers.size > 0 ? "connected" : "waiting");
+            }
+        }
+
+        // ---- 相手のタイル ----
+        const SVG_MIC_OFF = '<svg class="muted-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-label="ミュート中"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>';
+
+        function addTile(p) {
+            const tile = document.createElement("div");
+            tile.className = "tile";
+            // 固定の HTML だけを innerHTML で作り，名前などの値は textContent で入れる
+            tile.innerHTML = '<video autoplay playsinline></video>'
+                + '<div class="placeholder"><div class="avatar"></div><span></span></div>'
+                + '<div class="tag">' + SVG_MIC_OFF + '<span class="name"></span><span class="host-badge" hidden>ホスト</span></div>';
+            tile.querySelector(".avatar").textContent = Array.from(p.name)[0] || "?";
+            tile.querySelector(".name").textContent = p.name;
+            tile.querySelector(".host-badge").hidden = !p.isHost;
+            tiles.set(p.id, tile);
+            grid.append(tile);
+            peerChanged(p);
+            updateRoomState();
+        }
+
+        function removeTile(p) {
+            const tile = tiles.get(p.id);
+            if (tile) {
+                tile.querySelector("video").srcObject = null;
+                tile.remove();
+                tiles.delete(p.id);
+            }
+            updateRoomState();
+        }
+
+        function peerStream(p) {
+            const tile = tiles.get(p.id);
+            if (tile) {
+                const video = tile.querySelector("video");
+                video.srcObject = p.stream; // 映像と音声 (音声もこの要素から再生する)
+                video.play().catch(() => {});
+            }
+            peerChanged(p);
+        }
+
+        function peerChanged(p) { // 接続状態・カメラ・マイクの表示
+            const tile = tiles.get(p.id);
+            if (!tile) {
+                return;
+            }
+            const showVideo = p.status === "connected" && p.camOn;
+            tile.classList.toggle("failed", p.status === "failed");
+            tile.querySelector(".placeholder").hidden = showVideo;
+            tile.querySelector(".placeholder span").textContent =
+                p.status === "connecting" ? "接続しています…"
+                : p.status === "failed" ? "接続できませんでした"
+                : "カメラはオフです";
+            tile.querySelector(".muted-icon").style.display = p.status === "connected" && !p.micOn ? "" : "none";
         }
 
         function tick() {
@@ -1551,13 +1559,6 @@
             const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
             const pad = (n) => String(n).padStart(2, "0");
             timer.textContent = (h > 0 ? h + ":" : "") + pad(m) + ":" + pad(s);
-        }
-
-        function updateRemotePlaceholder() {
-            remotePlaceholder.hidden = remoteHasFrame && remoteCamOn;
-            remotePlaceholderText.textContent = state === "connected"
-                ? (remoteCamOn ? "相手の映像を待っています…" : "相手のカメラはオフです")
-                : state === "waiting" ? "参加者を待っています…" : "相手の映像はまだありません";
         }
 
         function setLogOpen(open) {
@@ -1941,17 +1942,15 @@
                 $("micSwitch").setAttribute("aria-checked", String(audioOn));
                 $("lobbyPlaceholder").hidden = videoOn;
             },
-            remoteState(videoOn, audioOn) {
-                remoteCamOn = videoOn;
-                $("remoteMicOff").hidden = audioOn;
-                updateRemotePlaceholder();
+            joined(me) { // 入室できた
+                $("selfName").textContent = "自分（" + me.name + "）";
+                setState("waiting");
+                updateRoomState();
             },
-            remoteFrame() {
-                if (!remoteHasFrame) {
-                    remoteHasFrame = true;
-                    updateRemotePlaceholder();
-                }
-            },
+            addTile,
+            removeTile,
+            peerStream,
+            peerChanged,
         };
     })();
 </script>
