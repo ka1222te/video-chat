@@ -242,7 +242,7 @@ In the browser, data received from the other user is handled as follows.
 - Video and audio arrive as binary data, and the image format (WebP / JPEG) is decided by the receiver, so the other user cannot make the page load external URLs
 - When sending cannot keep up with the connection, video frames are skipped so that latency does not keep growing
 - Text messages are truncated to 500 characters and shown as plain text, never interpreted as HTML
-- Delays derived from the other user's timestamps are capped at 1 second, and the audio playback queue at 50 chunks
+- Delays derived from the other user's timestamps are capped at 1 second, and audio that falls more than 0.25 seconds behind schedule is dropped to catch up
 
 ## 8. License
 

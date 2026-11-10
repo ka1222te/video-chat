@@ -107,7 +107,11 @@
         logs.scrollTop = logs.scrollHeight; // 高さ更新
     }
 
-    function sendMedia(kind, payload, maxBuffered, sampleRate = 0) { // メディアメッセージ送信 (送れなかったら false)
+    function mediaTimestamp(t = performance.now()) { // 送信開始からの経過時間(ms)
+        return Math.max(0, Math.floor(t - sendStartTime)) >>> 0;
+    }
+
+    function sendMedia(kind, payload, maxBuffered, timestamp, sampleRate = 0) { // メディアメッセージ送信 (送れなかったら false)
         const ch = dataChannel;
         if (!ch || ch.readyState !== "open" || ch.bufferedAmount > maxBuffered) { // 未接続・送信が詰まっているとき
             return false;
@@ -118,7 +122,7 @@
         const buf = new Uint8Array(HEADER_BYTES + payload.byteLength);
         const view = new DataView(buf.buffer);
         view.setUint8(0, kind);
-        view.setUint32(4, Math.max(0, Math.floor(performance.now() - sendStartTime)) >>> 0, true);
+        view.setUint32(4, timestamp, true);
         view.setUint32(8, (sendSequence++) >>> 0, true);
         view.setUint32(12, sampleRate >>> 0, true);
         buf.set(payload, HEADER_BYTES);
@@ -167,12 +171,13 @@
                     canvas.height = h; // ビデオサイズ更新
                 }
                 ctx.drawImage(video, 0, 0, w, h); // 現在のフレーム描画
+                const timestamp = mediaTimestamp(); // 撮影時点のタイムスタンプ(エンコード後ではなく)
                 encoding = true;
                 // toBlob は非同期にエンコードするため，toDataURL と違いメインスレッドを止めない
                 canvas.toBlob(async (blob) => {
                     try {
                         if (blob) {
-                            sendMedia(frameKind, new Uint8Array(await blob.arrayBuffer()), MAX_BUFFERED_FRAME);
+                            sendMedia(frameKind, new Uint8Array(await blob.arrayBuffer()), MAX_BUFFERED_FRAME, timestamp);
                         }
                     } finally {
                         encoding = false;
@@ -182,18 +187,19 @@
 
             const audioCtx = new (window.AudioContext || window.webkitAudioContext)(); // 音声コンテキスト
             const source = audioCtx.createMediaStreamSource(stream); // 音声ソース取得
-            const processor = audioCtx.createScriptProcessor(8192, 1, 1); // バッファサイズを8192に増やしてチャンク間の継続性を向上
+            const processor = audioCtx.createScriptProcessor(2048, 1, 1); // 1 チャンク約 43ms (大きいほど録音から送信までの遅延が増える)
 
             processor.onaudioprocess = function (event) { // 音声データが処理される度に発火する処理
                 if (!dataChannel) {
                     return;
                 }
                 const input = event.inputBuffer.getChannelData(0); // ローカルの音声データ(Float32Array [-1,1])
+                const timestamp = mediaTimestamp(performance.now() - event.inputBuffer.duration * 1000); // チャンク先頭の録音時点
                 const pcm16 = new Int16Array(input.length); // Float32 -> Int16 PCM に変換
                 for (let i = 0; i < input.length; i++) { // [-1, 1] -> [-32767, 32767]
                     pcm16[i] = Math.round(Math.max(-1, Math.min(1, input[i])) * 32767);
                 }
-                sendMedia(KIND_PCM16, new Uint8Array(pcm16.buffer), MAX_BUFFERED_AUDIO, audioCtx.sampleRate); // 現在の音声データ送信
+                sendMedia(KIND_PCM16, new Uint8Array(pcm16.buffer), MAX_BUFFERED_AUDIO, timestamp, audioCtx.sampleRate); // 現在の音声データ送信
             };
 
             source.connect(processor); // ソースに音声処理を接続
@@ -226,26 +232,27 @@
         }
     }
 
-    // 受信側の時刻基準(映像/音声で共有)
-    // 送信側のタイムスタンプは DataChannel 確立時点起点のため、カメラ許可待ちの時間などが含まれる。
-    // 最初に受信したメディアのタイムスタンプを基準(0)として扱い、その分の遅延を表示に乗せないようにする。
-    const recvClock = { startTime: null, baseTimestamp: 0 };
-    function recvElapsed(timestamp) { // 基準からの (送信側経過時間, 受信側経過時間) を返す
-        if (recvClock.startTime === null) {
-            recvClock.startTime = performance.now();
-            recvClock.baseTimestamp = timestamp;
+    // ---- 受信側の再生時計 (映像/音声で共有) ----
+    // 送信時刻 timestamp のメディアを performance.now() 基準のいつ再生するかを決める．
+    //   再生時刻 = timestamp + offset + JITTER_BUFFER
+    // offset は「受信時刻 - 送信時刻」の最小値(最も速く届いたときの伝送遅延と時計の差)．
+    // 映像と音声を同じ式で再生するため両者のタイミングがそろい，遅延は JITTER_BUFFER 程度に収まる．
+    const JITTER_BUFFER = 200; // 届く間隔の揺らぎを吸収するための待ち(ms)
+    const MAX_WAIT = 1000; // 相手から届くタイムスタンプは信用できないため，待ち時間はこの範囲に制限する(ms)
+    let playoutOffset = null;
+    function playoutTime(timestamp) { // 再生すべき時刻 (performance.now() 基準)
+        const now = performance.now();
+        const transit = now - timestamp;
+        if (playoutOffset === null || transit < playoutOffset) { // より速く届いた → 基準を早める
+            playoutOffset = transit;
+        } else if (transit - playoutOffset > JITTER_BUFFER) { // 揺らぎ吸収分を超えて遅れて届く(経路が遅くなった) → 少しずつ基準を遅らせる
+            playoutOffset += (transit - playoutOffset - JITTER_BUFFER) * 0.05;
         }
-        return { sent: timestamp - recvClock.baseTimestamp, elapsed: performance.now() - recvClock.startTime };
-    }
-
-    // 相手から届くタイムスタンプは信用できないため，待ち時間はこの範囲に制限する(ミリ秒)
-    const MAX_SYNC_DELAY = 1000;
-    function clampDelay(ms) {
-        return Number.isFinite(ms) ? Math.min(Math.max(ms, 0), MAX_SYNC_DELAY) : 0;
+        const wait = timestamp + playoutOffset + JITTER_BUFFER - now;
+        return now + (Number.isFinite(wait) ? Math.min(Math.max(wait, 0), MAX_WAIT) : 0);
     }
 
     const renderRemoteFrame = (function () { // 受信したフレーム描画
-        const SYNC_BUFFER_DELAY = 300; // 同期バッファ遅延（ミリ秒）
         const MAX_DECODING = 3; // 同時にデコードするフレーム数の上限(追いつかないときは捨てる)
         const canvas = document.getElementById("remoteCanvas"); // キャンバス要素取得
         const ctx = canvas.getContext("2d"); // コンテキスト取得
@@ -256,8 +263,7 @@
             if (decoding >= MAX_DECODING) {
                 return;
             }
-            const { sent, elapsed } = recvElapsed(timestamp); // 基準からの経過時間
-            const delay = clampDelay((sent + SYNC_BUFFER_DELAY) - elapsed); // 遅延秒数計算(上限あり)
+            const at = playoutTime(timestamp); // 表示すべき時刻
             decoding++;
             // createImageBitmap はメインスレッドを止めずに画像をデコードする
             createImageBitmap(blob).then((bmp) => {
@@ -274,10 +280,11 @@
                     ctx.drawImage(bmp, 0, 0); // 画像描画
                     bmp.close();
                 };
-                if (delay <= 0) { // delayが0の場合は即座に表示、正の場合は待機
+                const wait = at - performance.now();
+                if (wait <= 0) { // 表示時刻を過ぎていれば即座に表示
                     draw();
                 } else {
-                    setTimeout(draw, delay); // 遅延を考慮して画像を描画
+                    setTimeout(draw, wait);
                 }
             }).catch(() => {
                 console.error("renderRemoteFrame: failed to decode frame", sequence);
@@ -291,27 +298,31 @@
 
     const playRemoteAudioChunk = (function () { // 受信した音声再生
         const audioCtx = remoteAudioCtx;
-        const SYNC_BUFFER_DELAY = 300; // 同期バッファ遅延（ミリ秒）
-        const audioQueue = []; // 音声キュー
-        const MAX_AUDIO_QUEUE = 50; // キューに溜める最大チャンク数(約 8 秒分)
         const MAX_CHUNK_SAMPLES = 32768; // 1 チャンクの最大サンプル数
-        let isPlaying = false; // 再生フラグ
-        let nextPlayTime = 0; // 次のチャンクを再生すべき時刻(audioCtx.currentTime 基準)
-        const INITIAL_BUFFER_SIZE = 5; // 初期バッファサイズ(チャンク溜めてから再生開始)
+        const JOIN_GAP = 0.03; // 前のチャンクの終わりとの差がこれ以内ならつなげて再生する(秒，プツプツ音の防止)
+        const MAX_LAG = 0.25; // 予定より遅れて再生しているチャンクがこれを超えたら捨てて追いつく(秒)
+        let lastEnd = 0; // 直前に予約したチャンクの再生終了時刻(audioCtx.currentTime 基準)
 
-        function sortQueue() { // キューをタイムスタンプ順にソート
-            audioQueue.sort((a, b) => a.timestamp !== b.timestamp ? a.timestamp - b.timestamp : a.sequence - b.sequence);
-        }
-        function playNext() { // 順次再生する関数
-            if (audioQueue.length === 0) { // キューサイズが0のとき
-                isPlaying = false; // 再生停止
+        return function (pcm16, sampleRate, timestamp, sequence) { // 音声再生(届いた時点で再生時刻を予約する)
+            if (pcm16.length === 0 || pcm16.length > MAX_CHUNK_SAMPLES || sampleRate < 8000 || sampleRate > 96000) { // 不正なデータは捨てる
                 return;
             }
-            sortQueue(); // タイムスタンプ順にソート
-            const { pcm16, sampleRate, timestamp } = audioQueue.shift(); // 1つアイテムを抜き出す
-
+            const at = playoutTime(timestamp); // 再生すべき時刻 (performance.now() 基準)
+            if (audioCtx.state !== "running") { // 自動再生制限などで止まっているとき
+                return;
+            }
+            // performance.now() 基準 → audioCtx.currentTime 基準に変換(スピーカーから出るまでの遅延分だけ早める)
+            const now = audioCtx.currentTime;
+            const target = now + (at - performance.now()) / 1000 - (audioCtx.outputLatency || audioCtx.baseLatency || 0);
+            let start = Math.max(target, now);
+            if (Math.abs(start - lastEnd) < JOIN_GAP || start < lastEnd) { // 前のチャンクに続けて再生
+                start = Math.max(lastEnd, now);
+            }
+            if (start - target > MAX_LAG) { // 再生が予定より大きく遅れている → このチャンクを捨てて遅延を解消
+                return;
+            }
             try {
-                // 送信側のサンプリングレートで作る(受信側と異なっても音程がずれないよう，ブラウザが変換して再生する)
+                // 送信側のサンプリングレートで作る(受信側と異なってもブラウザが変換して再生するため音程がずれない)
                 const audioBuffer = audioCtx.createBuffer(1, pcm16.length, sampleRate);
                 const channel = audioBuffer.getChannelData(0); // チャンネルデータ取得
                 for (let i = 0; i < pcm16.length; i++) { // Int16 -> Float32 に変換
@@ -320,39 +331,10 @@
                 const source = audioCtx.createBufferSource(); // ソース作成
                 source.buffer = audioBuffer; // バッファ指定
                 source.connect(audioCtx.destination); // 再生先に接続
-
-                const { sent, elapsed } = recvElapsed(timestamp); // 基準からの経過時間
-                const delaySeconds = clampDelay((sent + SYNC_BUFFER_DELAY) - elapsed) / 1000; // 遅延秒数取得(上限あり)
-                const startTime = Math.max(audioCtx.currentTime, nextPlayTime) + delaySeconds; // 再生開始時刻
-
-                source.onended = function () {
-                    nextPlayTime = startTime + audioBuffer.duration; // このチャンクの終了時刻を記録
-                    playNext(); // 次のチャンクを再生
-                };
-                source.start(startTime); // 音声を再生
+                source.start(start); // 予約した時刻に再生
+                lastEnd = start + audioBuffer.duration;
             } catch (e) { // エラー発生時
                 console.error("playRemoteAudioChunk error", e); // デバッグ用
-                playNext(); // 次のチャンクを再生
-            }
-        }
-
-        return function (pcm16, sampleRate, timestamp, sequence) { // 音声再生
-            if (pcm16.length === 0 || pcm16.length > MAX_CHUNK_SAMPLES || sampleRate < 8000 || sampleRate > 96000) { // 不正なデータは捨てる
-                return;
-            }
-            recvElapsed(timestamp); // 時刻基準を初期化(未設定のとき)
-            if (audioQueue.length >= MAX_AUDIO_QUEUE) { // 再生が追いつかないときは古いチャンクを捨てる(メモリ保護)
-                audioQueue.shift();
-            }
-            audioQueue.push({ pcm16, sampleRate, timestamp, sequence }); // キューに追加
-
-            if (!isPlaying) { // まだ再生していない場合
-                if (audioQueue.length < INITIAL_BUFFER_SIZE) { // 初期バッファのとき
-                    return; // まだ溜める
-                }
-                isPlaying = true; // 再生開始
-                nextPlayTime = audioCtx.currentTime + 0.1; // 100ms遅延
-                playNext(); // 次のチャンクを再生
             }
         };
     })();
