@@ -270,7 +270,6 @@ See [LICENSE](LICENSE) for the Apache License 2.0 text and [NOTICE](NOTICE) for 
 | Resource | License / Terms | Notes |
 |---|---|---|
 | `wasm_exec.js` (The Go Authors) | BSD 3-Clause License | Not in the repository; `setup.sh` copies it from your Go installation |
-| [mini.css](https://github.com/Chalarangelo/mini.css) v3.0.1 | MIT License | Loaded from the jsDelivr CDN |
 | Google public STUN server (`stun.l.google.com`) | Free service provided by Google (no SLA) | Can be changed with `STUN_URLS` in `.env` |
 
 ### Compatible Protocols

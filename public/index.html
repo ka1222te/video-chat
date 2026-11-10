@@ -1,36 +1,449 @@
+<!doctype html>
 <html lang="ja">
 
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Video Chat</title>
-    <link rel="stylesheet"
-        href="https://cdn.jsdelivr.net/gh/Chalarangelo/mini.css@v3.0.1/dist/mini-default.min.css">
+    <style>
+        :root {
+            --bg: #0f1115;
+            --surface: #1a1d24;
+            --surface-2: #252932;
+            --border: rgba(255, 255, 255, 0.08);
+            --text: #e8eaed;
+            --muted: #9aa0a6;
+            --accent: #3b82f6;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --bar-h: 76px;
+            color-scheme: dark;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body {
+            margin: 0;
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif;
+            font-size: 14px;
+            overflow: hidden;
+        }
+
+        button { font: inherit; color: inherit; }
+
+        .app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            height: 100dvh;
+        }
+
+        /* ---- 上部バー ---- */
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 10px 16px;
+            min-height: 48px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
+        .brand svg { color: var(--accent); }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 12px;
+            border-radius: 999px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            font-size: 13px;
+            white-space: nowrap;
+        }
+
+        .status .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--muted);
+        }
+
+        .status[data-state="waiting"] .dot,
+        .status[data-state="connecting"] .dot { background: #f59e0b; animation: pulse 1.2s infinite; }
+        .status[data-state="connected"] .dot { background: var(--success); }
+        .status[data-state="failed"] .dot,
+        .status[data-state="ended"] .dot { background: var(--danger); }
+        .status .timer { color: var(--text); font-variant-numeric: tabular-nums; }
+
+        @keyframes pulse { 50% { opacity: 0.3; } }
+
+        /* ---- 映像エリア ---- */
+        .content {
+            flex: 1;
+            display: flex;
+            min-height: 0;
+            padding: 0 16px;
+            gap: 12px;
+        }
+
+        .stage {
+            position: relative;
+            flex: 1;
+            min-width: 0;
+            border-radius: 16px;
+            overflow: hidden;
+            background: #000;
+            border: 1px solid var(--border);
+        }
+
+        #remoteCanvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .placeholder {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            color: var(--muted);
+            background: var(--surface);
+        }
+
+        .avatar {
+            display: grid;
+            place-items: center;
+            width: 96px;
+            height: 96px;
+            border-radius: 50%;
+            background: var(--surface-2);
+            color: var(--muted);
+        }
+
+        .tag {
+            position: absolute;
+            left: 12px;
+            bottom: 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.55);
+            font-size: 13px;
+            z-index: 2;
+        }
+
+        .tag .muted-icon { color: var(--danger); }
+
+        /* 自分の映像 (右下の小窓) */
+        .self {
+            position: absolute;
+            right: 16px;
+            bottom: 16px;
+            width: clamp(120px, 24%, 300px);
+            aspect-ratio: 4 / 3;
+            border-radius: 12px;
+            overflow: hidden;
+            background: var(--surface-2);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            z-index: 3;
+        }
+
+        .self video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 鏡のように表示 (送る映像は反転しない) */
+        }
+
+        .self .placeholder .avatar { width: 48px; height: 48px; }
+        .self .tag { left: 8px; bottom: 8px; font-size: 12px; padding: 2px 8px; }
+
+        /* 開始前・待機中などの案内 */
+        .overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            padding: 24px;
+            text-align: center;
+            background: rgba(15, 17, 21, 0.82);
+            z-index: 4;
+        }
+
+        .overlay h1 { margin: 0; font-size: 22px; font-weight: 600; }
+        .overlay p { margin: 0; color: var(--muted); max-width: 420px; line-height: 1.6; }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 3px solid var(--surface-2);
+            border-top-color: var(--accent);
+            animation: spin 0.9s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 28px;
+            border: 0;
+            border-radius: 999px;
+            background: var(--accent);
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .primary:hover { filter: brightness(1.1); }
+        .primary:disabled { opacity: 0.5; cursor: default; filter: none; }
+
+        /* ---- ログパネル ---- */
+        .log-panel {
+            display: none;
+            flex-direction: column;
+            width: 360px;
+            border-radius: 16px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .app.log-open .log-panel { display: flex; }
+
+        .log-panel header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 12px 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+        }
+
+        .icon-btn {
+            display: grid;
+            place-items: center;
+            width: 32px;
+            height: 32px;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+        }
+
+        .icon-btn:hover { background: var(--surface-2); color: var(--text); }
+
+        #logs {
+            flex: 1;
+            margin: 0;
+            padding: 12px 16px;
+            border: 0;
+            resize: none;
+            background: transparent;
+            color: var(--text);
+            font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            outline: none;
+        }
+
+        /* ---- 下部のコントロールバー ---- */
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            height: var(--bar-h);
+            padding: 0 16px;
+        }
+
+        .ctrl {
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            min-width: 64px;
+            padding: 8px 10px;
+            border: 0;
+            border-radius: 12px;
+            background: transparent;
+            color: var(--text);
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .ctrl:hover { background: var(--surface); }
+        .ctrl .on-icon, .ctrl.off .off-icon { display: block; }
+        .ctrl .off-icon, .ctrl.off .on-icon { display: none; }
+        .ctrl.off svg { color: var(--danger); }
+        .ctrl.active { background: var(--surface); }
+
+        .badge {
+            position: absolute;
+            top: 4px;
+            right: 14px;
+            min-width: 18px;
+            height: 18px;
+            padding: 0 5px;
+            border-radius: 9px;
+            background: var(--danger);
+            color: #fff;
+            font-size: 11px;
+            line-height: 18px;
+            text-align: center;
+        }
+
+        .call-btn {
+            margin: 0 8px;
+            padding: 10px 22px;
+            border: 0;
+            border-radius: 999px;
+            background: var(--success);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .call-btn.leave { background: var(--danger); }
+        .call-btn:hover { filter: brightness(1.1); }
+        .call-btn:disabled { opacity: 0.5; cursor: default; filter: none; }
+
+        [hidden] { display: none !important; }
+
+        @media (max-width: 720px) {
+            .content { padding: 0 8px; }
+            .stage { border-radius: 12px; }
+            .self { width: 34%; right: 10px; bottom: 10px; }
+            .app.log-open .log-panel {
+                position: fixed;
+                inset: 56px 8px calc(var(--bar-h) + 4px) 8px;
+                width: auto;
+                z-index: 10;
+            }
+            .controls { gap: 2px; padding: 0 8px; }
+            .ctrl { min-width: 52px; padding: 8px 4px; }
+            .ctrl .label { display: none; }
+            .badge { right: 6px; }
+            .call-btn { margin: 0 4px; padding: 10px 16px; }
+            .status .label { display: none; }
+        }
+    </style>
 </head>
 
 <body>
-    <header class="sticky row">
-        <h4>Video Chat</h4>
-    </header>
-    <div>
-        <p>
-            <button onclick="startVideoChat()" class="secondary">START VIDEO CHAT</button>
-        </p>
-        <div class="row">
-            <div class="col-sm-6 col-md-6">
-                <h4>LOCAL CAMERA</h4>
-                <video id="localVideo" autoplay muted playsinline style="width: 100%; background: #000;"></video>
+    <div class="app" id="app">
+        <header class="topbar">
+            <div class="brand">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
+                Video Chat
             </div>
-            <div class="col-sm-6 col-md-6">
-                <h4>REMOTE CAMERA</h4>
-                <canvas id="remoteCanvas" style="width: 100%; background: #000;"></canvas>
+            <div class="status" id="status" data-state="idle">
+                <span class="dot"></span>
+                <span class="label" id="statusText">未接続</span>
+                <span class="timer" id="timer" hidden>00:00</span>
             </div>
-        </div>
-        <h4>CONNECTION LOG</h4>
-        <textarea style="height:300px;width:100%;" id="logs" disabled></textarea>
-    </div>
-</body>
+        </header>
 
-</html>
+        <main class="content">
+            <section class="stage" aria-label="相手の映像">
+                <canvas id="remoteCanvas"></canvas>
+                <div class="placeholder" id="remotePlaceholder">
+                    <div class="avatar">
+                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+                    </div>
+                    <span id="remotePlaceholderText">相手の映像はまだありません</span>
+                </div>
+                <div class="tag" id="remoteTag" hidden>
+                    <svg class="muted-icon" id="remoteMicOff" hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-label="ミュート中"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
+                    相手
+                </div>
+
+                <div class="self" aria-label="自分の映像">
+                    <video id="localVideo" autoplay muted playsinline></video>
+                    <div class="placeholder" id="localPlaceholder">
+                        <div class="avatar">
+                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+                        </div>
+                    </div>
+                    <div class="tag">
+                        <svg class="muted-icon" id="localMicOff" hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-label="ミュート中"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
+                        自分
+                    </div>
+                </div>
+
+                <div class="overlay" id="overlay">
+                    <div class="spinner" id="overlaySpinner" hidden></div>
+                    <h1 id="overlayTitle">ビデオ通話を始めましょう</h1>
+                    <p id="overlayText">「通話を開始」を押すと，同じように待っている相手とつながります．カメラとマイクの使用を許可してください．</p>
+                    <button class="primary" id="overlayButton" disabled>読み込み中…</button>
+                </div>
+            </section>
+
+            <aside class="log-panel" id="logPanel" aria-label="接続ログ">
+                <header>
+                    接続ログ
+                    <button class="icon-btn" id="logClose" title="閉じる" aria-label="ログを閉じる">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                    </button>
+                </header>
+                <textarea id="logs" readonly></textarea>
+            </aside>
+        </main>
+
+        <nav class="controls" aria-label="通話の操作">
+            <button class="ctrl" id="micBtn" title="マイクのオン/オフ" aria-pressed="true">
+                <svg class="on-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+                <svg class="off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M3 3l18 18"/></svg>
+                <span class="label" id="micLabel">ミュート</span>
+            </button>
+            <button class="ctrl" id="camBtn" title="カメラのオン/オフ" aria-pressed="true">
+                <svg class="on-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5z"/></svg>
+                <svg class="off-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M16 10.5l6-3.5v10l-6-3.5zM2 2l20 20"/></svg>
+                <span class="label" id="camLabel">ビデオの停止</span>
+            </button>
+
+            <button class="call-btn" id="callBtn" disabled>通話を開始</button>
+
+            <button class="ctrl" id="logBtn" title="接続ログ" aria-pressed="false">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                <span class="label">ログ</span>
+                <span class="badge" id="logBadge" hidden>0</span>
+            </button>
+            <button class="ctrl" id="fullBtn" title="全画面表示">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+                <span class="label">全画面</span>
+            </button>
+        </nav>
+    </div>
 
 <script src="wasm_exec.js"></script>
 <script>
@@ -42,15 +455,20 @@
       .then(r => r.arrayBuffer())
       .then(bytes => WebAssembly.instantiate(bytes, go.importObject))
       .then(result => {
-          go.run(result.instance);
+          go.run(result.instance); // Go の main が待機に入った時点で NewVideoChat が使えるようになる
+          ui.ready();
+      })
+      .catch(e => {
+          console.error(e);
+          ui.loadFailed();
       });
 
     // ---- DataChannel で送るメディアメッセージ (バイナリ) ----
-    // [0] 種別 (1: WebP 画像, 2: JPEG 画像, 3: 16bit PCM 音声)  [1-3] 予約
+    // [0] 種別 (1: WebP 画像, 2: JPEG 画像, 3: 16bit PCM 音声, 4: カメラ・マイクの状態)  [1-3] 予約
     // [4-7] タイムスタンプ(ms, 送信開始から)  [8-11] シーケンス番号  [12-15] 音声のサンプリングレート(Hz)
     // [16-] データ本体 (いずれも uint32 リトルエンディアン)
     const HEADER_BYTES = 16;
-    const KIND_WEBP = 1, KIND_JPEG = 2, KIND_PCM16 = 3;
+    const KIND_WEBP = 1, KIND_JPEG = 2, KIND_PCM16 = 3, KIND_STATE = 4;
     const FRAME_MIME = { [KIND_WEBP]: "image/webp", [KIND_JPEG]: "image/jpeg" };
     const MAX_MESSAGE_BYTES = 200 * 1024; // 1 メッセージの上限(ブラウザ間で安全に送れる大きさ)
     // 送信バッファ(bufferedAmount)がこれを超えている間は送らない(回線が追いつかないとき遅延が伸び続けるのを防ぐ)．
@@ -64,16 +482,24 @@
     let sendStartTime = null; // 送信開始タイムスタンプ
     let sendSequence = 0; // 送信シーケンス
     let cameraStarted = false; // カメラ起動済みフラグ
+    let localStream = null; // カメラ・マイクのストリーム
+    let micOn = true; // マイクのオン/オフ
+    let camOn = true; // カメラのオン/オフ
 
     window.onP2PReady = function (ch) { // P2P 接続完了処理 (Go から呼ばれる)
         dataChannel = ch;
         ch.binaryType = "arraybuffer";
         ch.onmessage = onRemoteMessage; // 受信は JS で直接処理する (Go を経由しない)
-        ch.addEventListener("close", () => { dataChannel = null; });
+        ch.addEventListener("close", () => {
+            dataChannel = null;
+            ui.setState("ended");
+        });
         const start = () => {
             sendStartTime = performance.now(); // 送信開始時刻を記録
             sendSequence = 0; // シーケンス番号をリセット
             appendLog("[Sys]: P2P DataChannel is ready. Start camera."); // ログ追加
+            ui.setState("connected");
+            sendLocalState(); // カメラ・マイクの状態を相手に伝える
             if (!cameraStarted) {
                 cameraStarted = true;
                 startLocalCamera(); // カメラ起動&データ送信
@@ -88,13 +514,17 @@
 
     function startVideoChat() { // ビデオ通信開始
         if (!window.NewVideoChat) { // ビデオ通信開始処理が存在しないとき
-            alert("WASM is not initialized yet."); // エラー
             return;
         }
         remoteAudioCtx.resume(); // ブラウザの自動再生制限で停止している音声出力を，クリック操作を契機に再開
         appendLog("[Sys]: Start matchmaking..."); // ログ追加
+        ui.setState("waiting");
         window.NewVideoChat(); // ビデオ通話開始(Go)
     }
+
+    window.onCallStatus = function (state) { // Go から呼ばれる (waiting / connecting / failed)
+        ui.setState(state);
+    };
 
     const MAX_LOG_CHARS = 20000; // ログの最大文字数(相手からの大量のメッセージでメモリを圧迫しないよう古い方から捨てる)
     function appendLog(msg) { // ログ出力 (textarea の value に追記するため HTML としては解釈されない)
@@ -105,6 +535,7 @@
         }
         logs.value = text;
         logs.scrollTop = logs.scrollHeight; // 高さ更新
+        ui.logAdded();
     }
 
     function mediaTimestamp(t = performance.now()) { // 送信開始からの経過時間(ms)
@@ -141,6 +572,8 @@
                 video: true,
                 audio: true,
             }); // メディア起動
+            localStream = stream;
+            applyLocalState(); // 開始前に切り替えたオン/オフを反映
             const video = document.getElementById("localVideo"); // ローカルビデオ要素取得
             video.srcObject = stream; // ストリーム指定
 
@@ -155,7 +588,7 @@
 
             setInterval(() => { // 映像フレーム送信
                 const ch = dataChannel;
-                if (encoding || !ch || ch.readyState !== "open" || ch.bufferedAmount > MAX_BUFFERED_FRAME) { // 送れないときはエンコードも省く
+                if (!camOn || encoding || !ch || ch.readyState !== "open" || ch.bufferedAmount > MAX_BUFFERED_FRAME) { // 送れないときはエンコードも省く
                     return;
                 }
                 const vw = video.videoWidth; // ビデオサイズ
@@ -190,7 +623,7 @@
             const processor = audioCtx.createScriptProcessor(2048, 1, 1); // 1 チャンク約 43ms (大きいほど録音から送信までの遅延が増える)
 
             processor.onaudioprocess = function (event) { // 音声データが処理される度に発火する処理
-                if (!dataChannel) {
+                if (!dataChannel || !micOn) { // ミュート中は送らない
                     return;
                 }
                 const input = event.inputBuffer.getChannelData(0); // ローカルの音声データ(Float32Array [-1,1])
@@ -207,8 +640,35 @@
             appendLog("[Sys]: Local camera & mic started."); // ログ
         } catch (e) { // エラー時
             console.error(e); // デバッグ用
-            alert("Failed to start camera and audio: " + e.message); // エラー
+            appendLog("[Sys]: Failed to start camera and audio: " + e.message); // ログ
+            ui.mediaFailed(e);
         }
+    }
+
+    function applyLocalState() { // カメラ・マイクのオン/オフをストリームと画面に反映
+        if (localStream) {
+            localStream.getAudioTracks().forEach(t => { t.enabled = micOn; });
+            localStream.getVideoTracks().forEach(t => { t.enabled = camOn; });
+        }
+        ui.localState(camOn && localStream !== null, micOn);
+    }
+
+    function sendLocalState() { // カメラ・マイクの状態を相手に伝える (bit0: カメラ, bit1: マイク)
+        if (sendStartTime !== null) {
+            sendMedia(KIND_STATE, new Uint8Array([(camOn ? 1 : 0) | (micOn ? 2 : 0)]), MAX_BUFFERED_AUDIO, mediaTimestamp());
+        }
+    }
+
+    function toggleMic() {
+        micOn = !micOn;
+        applyLocalState();
+        sendLocalState();
+    }
+
+    function toggleCam() {
+        camOn = !camOn;
+        applyLocalState();
+        sendLocalState();
     }
 
     function onRemoteMessage(event) { // 相手から届いたメッセージ
@@ -229,6 +689,9 @@
             renderRemoteFrame(new Blob([new Uint8Array(data, HEADER_BYTES)], { type: FRAME_MIME[kind] }), timestamp, sequence);
         } else if (kind === KIND_PCM16 && (data.byteLength - HEADER_BYTES) % 2 === 0) {
             playRemoteAudioChunk(new Int16Array(data, HEADER_BYTES), view.getUint32(12, true), timestamp, sequence);
+        } else if (kind === KIND_STATE && data.byteLength > HEADER_BYTES) {
+            const flags = view.getUint8(HEADER_BYTES);
+            ui.remoteState((flags & 1) !== 0, (flags & 2) !== 0);
         }
     }
 
@@ -279,6 +742,7 @@
                     }
                     ctx.drawImage(bmp, 0, 0); // 画像描画
                     bmp.close();
+                    ui.remoteFrame();
                 };
                 const wait = at - performance.now();
                 if (wait <= 0) { // 表示時刻を過ぎていれば即座に表示
@@ -338,5 +802,172 @@
             }
         };
     })();
-</script>
+    // ---- 画面の表示・操作 ----
+    const ui = (function () {
+        const $ = (id) => document.getElementById(id);
+        const app = $("app");
+        const overlay = $("overlay"), overlayTitle = $("overlayTitle"), overlayText = $("overlayText");
+        const overlayButton = $("overlayButton"), overlaySpinner = $("overlaySpinner");
+        const status = $("status"), statusText = $("statusText"), timer = $("timer");
+        const callBtn = $("callBtn"), micBtn = $("micBtn"), camBtn = $("camBtn"), logBtn = $("logBtn"), logBadge = $("logBadge");
+        const remotePlaceholder = $("remotePlaceholder"), remotePlaceholderText = $("remotePlaceholderText");
+        let state = "loading";
+        let unread = 0;
+        let connectedAt = 0, timerId = null;
+        let remoteCamOn = true, remoteHasFrame = false;
 
+        // 状態ごとの表示: [上部の表示, 案内のタイトル, 案内の本文, 案内のボタン(null なら非表示), 待機表示]
+        const views = {
+            idle: ["未接続", "ビデオ通話を始めましょう", "「通話を開始」を押すと，同じように待っている相手とつながります．カメラとマイクの使用を許可してください．", "通話を開始", false],
+            waiting: ["相手を待っています", "相手を探しています…", "もう一人が「通話を開始」を押すとつながります．", null, true],
+            connecting: ["接続中", "相手が見つかりました", "P2P 接続を確立しています…", null, true],
+            connected: ["通話中", "", "", null, false],
+            failed: ["接続失敗", "接続できませんでした", "時間をおいてもう一度お試しください．詳しくはログを確認してください．", "もう一度試す", false],
+            ended: ["通話終了", "通話が終了しました", "相手が退出したか，接続が切れました．", "新しい通話を始める", false],
+        };
+
+        function setState(next) {
+            if (state === "ended" && next !== "idle") { // 終了後に届く古い通知は無視
+                return;
+            }
+            state = next;
+            const [label, title, text, button, busy] = views[next];
+            status.dataset.state = next;
+            statusText.textContent = label;
+            overlay.hidden = next === "connected";
+            overlayTitle.textContent = title;
+            overlayText.textContent = text;
+            overlaySpinner.hidden = !busy;
+            overlayButton.hidden = button === null;
+            if (button !== null) {
+                overlayButton.textContent = button;
+                overlayButton.disabled = false;
+            }
+            // 下部の通話ボタン: 開始前は「通話を開始」，それ以外は「退出」
+            const canStart = next === "idle" || next === "failed";
+            callBtn.textContent = canStart ? "通話を開始" : next === "ended" ? "新しい通話" : "退出";
+            callBtn.classList.toggle("leave", !canStart && next !== "ended");
+            callBtn.disabled = false;
+            if (next === "connected") {
+                connectedAt = Date.now();
+                timer.hidden = false;
+                tick();
+                timerId = setInterval(tick, 1000);
+            } else if (timerId !== null) {
+                clearInterval(timerId);
+                timerId = null;
+            }
+            $("remoteTag").hidden = next !== "connected";
+            updateRemotePlaceholder();
+        }
+
+        function tick() {
+            const sec = Math.floor((Date.now() - connectedAt) / 1000);
+            const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+            const pad = (n) => String(n).padStart(2, "0");
+            timer.textContent = (h > 0 ? h + ":" : "") + pad(m) + ":" + pad(s);
+        }
+
+        function updateRemotePlaceholder() {
+            const show = !remoteHasFrame || !remoteCamOn;
+            remotePlaceholder.hidden = !show;
+            remotePlaceholderText.textContent = state === "connected"
+                ? (remoteCamOn ? "相手の映像を待っています…" : "相手のカメラはオフです")
+                : "相手の映像はまだありません";
+        }
+
+        function primaryAction() { // 開始 / もう一度 / 新しい通話
+            if (state === "ended") { // 通話の状態を確実に初期化するため再読み込み
+                location.reload();
+                return;
+            }
+            callBtn.disabled = true;
+            overlayButton.disabled = true;
+            startVideoChat();
+        }
+
+        function setLogOpen(open) {
+            app.classList.toggle("log-open", open);
+            logBtn.classList.toggle("active", open);
+            logBtn.setAttribute("aria-pressed", String(open));
+            if (open) {
+                unread = 0;
+                logBadge.hidden = true;
+                const logs = $("logs");
+                logs.scrollTop = logs.scrollHeight;
+            }
+        }
+
+        callBtn.addEventListener("click", () => {
+            if (state === "idle" || state === "failed" || state === "ended") {
+                primaryAction();
+            } else if (confirm("通話を終了しますか？")) { // 待機中・通話中は退出 (状態を確実に初期化するため再読み込み)
+                location.reload();
+            }
+        });
+        overlayButton.addEventListener("click", primaryAction);
+        micBtn.addEventListener("click", () => toggleMic());
+        camBtn.addEventListener("click", () => toggleCam());
+        logBtn.addEventListener("click", () => setLogOpen(!app.classList.contains("log-open")));
+        $("logClose").addEventListener("click", () => setLogOpen(false));
+        $("fullBtn").addEventListener("click", () => {
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            } else if (document.documentElement.requestFullscreen) {
+                document.documentElement.requestFullscreen().catch(() => {});
+            }
+        });
+        document.addEventListener("keydown", (e) => { // Esc でログを閉じる
+            if (e.key === "Escape") {
+                setLogOpen(false);
+            }
+        });
+
+        return {
+            setState,
+            ready() { // WASM の読み込み完了
+                setState("idle");
+            },
+            loadFailed() {
+                state = "loading";
+                overlayTitle.textContent = "読み込みに失敗しました";
+                overlayText.textContent = "ページを再読み込みしてください．";
+                overlayButton.hidden = true;
+            },
+            mediaFailed(e) {
+                alert("カメラ・マイクを使えませんでした: " + e.message);
+            },
+            logAdded() {
+                if (!app.classList.contains("log-open")) {
+                    unread++;
+                    logBadge.textContent = unread > 99 ? "99+" : String(unread);
+                    logBadge.hidden = false;
+                }
+            },
+            localState(videoOn, audioOn) {
+                micBtn.classList.toggle("off", !audioOn);
+                micBtn.setAttribute("aria-pressed", String(audioOn));
+                $("micLabel").textContent = audioOn ? "ミュート" : "ミュート解除";
+                camBtn.classList.toggle("off", !camOn);
+                camBtn.setAttribute("aria-pressed", String(camOn));
+                $("camLabel").textContent = camOn ? "ビデオの停止" : "ビデオの開始";
+                $("localMicOff").hidden = audioOn;
+                $("localPlaceholder").hidden = videoOn;
+            },
+            remoteState(videoOn, audioOn) {
+                remoteCamOn = videoOn;
+                $("remoteMicOff").hidden = audioOn;
+                updateRemotePlaceholder();
+            },
+            remoteFrame() {
+                if (!remoteHasFrame) {
+                    remoteHasFrame = true;
+                    updateRemotePlaceholder();
+                }
+            },
+        };
+    })();
+</script>
+</body>
+
+</html>

@@ -270,7 +270,6 @@ Apache License 2.0 の条文は [LICENSE](LICENSE)，著作権表示と改変の
 | リソース | ライセンス・利用条件 | 備考 |
 |---|---|---|
 | `wasm_exec.js`（The Go Authors） | BSD 3-Clause License | リポジトリには含めず，`setup.sh` が Go のインストール先からコピー |
-| [mini.css](https://github.com/Chalarangelo/mini.css) v3.0.1 | MIT License | jsDelivr の CDN から読み込み |
 | Google の公開 STUN サーバ（`stun.l.google.com`） | Google が提供する無償サービス（SLA なし） | `.env` の `STUN_URLS` で変更可 |
 
 ### 互換プロトコル

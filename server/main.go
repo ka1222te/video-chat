@@ -91,7 +91,7 @@ func limitConns(sem chan struct{}, h http.Handler) http.Handler {
 //   - 'unsafe-inline'       : index.html のインラインスクリプト・style 属性に必要
 const contentSecurityPolicy = "default-src 'self'; " +
 	"script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
-	"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+	"style-src 'self' 'unsafe-inline'; " +
 	"img-src 'self' data:; " +
 	"connect-src 'self'; " +
 	"media-src 'self' blob: mediastream:; " +

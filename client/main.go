@@ -85,6 +85,7 @@ func main() {
 				log.Printf("%s: %v", stage, err)
 				logElem(fmt.Sprintf("[Sys]: %s failed. Please try again.\n", stage))
 				inProgress.Store(false)
+				callStatus("failed")
 			}
 			ws, _, err := websocket.Dial(context.Background(), mmURL.String(), nil) // マッチメイキングサーバ接続
 			if err != nil {
@@ -98,12 +99,14 @@ func main() {
 				return
 			}
 			logElem("[Sys]: Waiting match...\n") // ログ
+			callStatus("waiting")
 			for {
 				if err := wsjson.Read(context.Background(), ws, &resMsg); err != nil { // レスポンスメッセージ読み込み
 					fail("Matchmaking", err)
 					return
 				}
 				if resMsg.Type == "MATCH" { // 接続完了時
+					callStatus("connecting")
 					break // ブレイク
 				}
 			}
@@ -196,10 +199,13 @@ func logElem(msg string) { // ログ表示
 	js.Global().Call("appendLog", strings.TrimSuffix(msg, "\n"))
 }
 
-func handleError() { // エラー処理
-	logElem("[Sys]: Maybe Any left, Please restart\n") // ログ
+// callStatus は通話の状態 (waiting / connecting / failed) を画面に伝える．
+func callStatus(status string) {
+	if f := js.Global().Get("onCallStatus"); f.Type() == js.TypeFunction {
+		f.Invoke(status)
+	}
 }
 
-func getElementByID(id string) js.Value { // idに対応する要素取得
-	return js.Global().Get("document").Call("getElementById", id) // 要素を返す
+func handleError() { // エラー処理
+	logElem("[Sys]: Maybe Any left, Please restart\n") // ログ
 }
